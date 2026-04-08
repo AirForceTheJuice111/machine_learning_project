@@ -1,0 +1,25 @@
+{
+    "target_boost_clock": {
+        "sm__sass_thread_inst_executed_op_fp32_pred_on.sum": 15000000000.0,
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": 99.9,
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 10.0
+    },
+    "target_memory_latency": {
+        "l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum": 5000,
+        "sm__sass_thread_inst_executed_per_inst_executed": 1.0
+    },
+    "target_effective_bandwidth": {
+        "dram__throughput.avg.pct_of_peak_sustained_elapsed": 85.0,
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": 30.0,
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 85.0,
+        "l1tex__data_bank_conflicts_pipe_lsu.sum": 0,
+        "sm__sass_thread_inst_executed_per_inst_executed": 32.0,
+        "sm__maximum_warps_per_active_cycle_pct": 100.0,
+        "sm__warps_active.avg.pct_of_peak_sustained_active": 95.0
+    },
+    "target_bank_conflict": {
+        "l1tex__data_bank_conflicts_pipe_lsu.sum": 1024,
+        "sm__throughput.avg.pct_of_peak_sustained_elapsed": 50.0,
+        "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": 20.0
+    }
+}

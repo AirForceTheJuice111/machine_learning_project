@@ -1,0 +1,23 @@
+[
+  {
+    "name": "target_boost_clock",
+    "type": "boost_clock",
+    "iterations": 5000000
+  },
+  {
+    "name": "target_memory_latency",
+    "type": "memory_latency",
+    "array_size": 2097152,
+    "stride": 128
+  },
+  {
+    "name": "target_effective_bandwidth",
+    "type": "effective_bandwidth",
+    "array_size": 20971520
+  },
+  {
+    "name": "target_bank_conflict",
+    "type": "bank_conflict",
+    "padding_size": 0
+  }
+]
