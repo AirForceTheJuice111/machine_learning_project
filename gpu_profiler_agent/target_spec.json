@@ -1,23 +1,10 @@
-[
-  {
-    "name": "target_boost_clock",
-    "type": "boost_clock",
-    "iterations": 5000000
-  },
-  {
-    "name": "target_memory_latency",
-    "type": "memory_latency",
-    "array_size": 2097152,
-    "stride": 128
-  },
-  {
-    "name": "target_effective_bandwidth",
-    "type": "effective_bandwidth",
-    "array_size": 20971520
-  },
-  {
-    "name": "target_bank_conflict",
-    "type": "bank_conflict",
-    "padding_size": 0
-  }
-]
+{
+  "targets": [
+    "dram_latency_cycles",
+    "max_shmem_per_block_kb",
+    "actual_boost_clock_mhz",
+    "l2_cache_capacity_kb",
+    "bank_conflict_penalty_cycles"
+  ],
+  "run": "/path/to/some/provided/executable"
+}

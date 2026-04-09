@@ -1,54 +1,75 @@
-[System] Loaded 4 targets from target_spec.json
+[System] Loaded 5 hardware intrinsic targets from target_spec.json
 [Planner] Analyzing targets from target_spec.json...
-[Planner] Target 'target_boost_clock' mapped to probe strategy 'boost_clock'
-[Planner] Target 'target_memory_latency' mapped to probe strategy 'memory_latency'
-[Planner] Target 'target_effective_bandwidth' mapped to probe strategy 'effective_bandwidth'
-[Planner] Target 'target_bank_conflict' mapped to probe strategy 'bank_conflict'
+[Planner] Target 'dram_latency_cycles' mapped to probe strategy 'dram_latency_cycles'
+[Planner] Target 'max_shmem_per_block_kb' mapped to probe strategy 'max_shmem_per_block_kb'
+[Planner] Target 'actual_boost_clock_mhz' mapped to probe strategy 'actual_boost_clock_mhz'
+[Planner] Target 'l2_cache_capacity_kb' mapped to probe strategy 'l2_cache_capacity_kb'
+[Planner] Target 'bank_conflict_penalty_cycles' mapped to probe strategy 'bank_conflict_penalty_cycles'
 [Executor] Starting constrained GPU execution (with asyncio.Lock).
-[Executor] Attempt 1/3 for target 'target_boost_clock'
-[Executor] Acquired GPU Lock for 'target_boost_clock'.
-[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/target_boost_clock.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/target_boost_clock.out
-[Executor] Running: ncu --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/target_boost_clock.out
-[Executor] Execution succeeded. Releasing GPU Lock.
-[Executor] Attempt 1/3 for target 'target_memory_latency'
-[Executor] Acquired GPU Lock for 'target_memory_latency'.
-[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/target_memory_latency.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/target_memory_latency.out
-[Executor] Running: ncu --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/target_memory_latency.out
-[Executor] Execution succeeded. Releasing GPU Lock.
-[Executor] Attempt 1/3 for target 'target_effective_bandwidth'
-[Executor] Acquired GPU Lock for 'target_effective_bandwidth'.
-[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/target_effective_bandwidth.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/target_effective_bandwidth.out
-[Executor] Running: ncu --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/target_effective_bandwidth.out
-[Executor] Execution succeeded. Releasing GPU Lock.
-[Executor] Attempt 1/3 for target 'target_bank_conflict'
-[Executor] Acquired GPU Lock for 'target_bank_conflict'.
-[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/target_bank_conflict.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/target_bank_conflict.out
-[Executor] Running: ncu --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/target_bank_conflict.out
-[Executor] Execution succeeded. Releasing GPU Lock.
+[Executor] Attempt 1/3 for target 'dram_latency_cycles'
+[Executor] Acquired GPU Lock for 'dram_latency_cycles'.
+[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/dram_latency_cycles.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/dram_latency_cycles.out
+[Executor] Initiating Cross-Verification (3 trials) to bypass potential OS-level caching/frequency scaling...
+[Executor] [Trial 1/3] Running: ncu --metrics l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/dram_latency_cycles.out
+[Executor] [Trial 2/3] Running: ncu --metrics l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/dram_latency_cycles.out
+[Executor] [Trial 3/3] Running: ncu --metrics l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/dram_latency_cycles.out
+[Executor] Cross-verification completed successfully. Releasing GPU Lock.
+[Executor] Attempt 1/3 for target 'max_shmem_per_block_kb'
+[Executor] Acquired GPU Lock for 'max_shmem_per_block_kb'.
+[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/max_shmem_per_block_kb.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/max_shmem_per_block_kb.out
+[Executor] Initiating Cross-Verification (3 trials) to bypass potential OS-level caching/frequency scaling...
+[Executor] [Trial 1/3] Running: ncu --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/max_shmem_per_block_kb.out
+[Executor] [Trial 2/3] Running: ncu --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/max_shmem_per_block_kb.out
+[Executor] [Trial 3/3] Running: ncu --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/max_shmem_per_block_kb.out
+[Executor] Cross-verification completed successfully. Releasing GPU Lock.
+[Executor] Attempt 1/3 for target 'actual_boost_clock_mhz'
+[Executor] Acquired GPU Lock for 'actual_boost_clock_mhz'.
+[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/actual_boost_clock_mhz.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/actual_boost_clock_mhz.out
+[Executor] Initiating Cross-Verification (3 trials) to bypass potential OS-level caching/frequency scaling...
+[Executor] [Trial 1/3] Running: ncu --metrics sm__sass_thread_inst_executed_op_fp32_pred_on.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/actual_boost_clock_mhz.out
+[Executor] [Trial 2/3] Running: ncu --metrics sm__sass_thread_inst_executed_op_fp32_pred_on.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/actual_boost_clock_mhz.out
+[Executor] [Trial 3/3] Running: ncu --metrics sm__sass_thread_inst_executed_op_fp32_pred_on.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/actual_boost_clock_mhz.out
+[Executor] Cross-verification completed successfully. Releasing GPU Lock.
+[Executor] Attempt 1/3 for target 'l2_cache_capacity_kb'
+[Executor] Acquired GPU Lock for 'l2_cache_capacity_kb'.
+[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/l2_cache_capacity_kb.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/l2_cache_capacity_kb.out
+[Executor] Initiating Cross-Verification (3 trials) to bypass potential OS-level caching/frequency scaling...
+[Executor] [Trial 1/3] Running: ncu --metrics l2__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/l2_cache_capacity_kb.out
+[Executor] [Trial 2/3] Running: ncu --metrics l2__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/l2_cache_capacity_kb.out
+[Executor] [Trial 3/3] Running: ncu --metrics l2__throughput.avg.pct_of_peak_sustained_elapsed --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/l2_cache_capacity_kb.out
+[Executor] Cross-verification completed successfully. Releasing GPU Lock.
+[Executor] Attempt 1/3 for target 'bank_conflict_penalty_cycles'
+[Executor] Acquired GPU Lock for 'bank_conflict_penalty_cycles'.
+[Executor] Running: nvcc /root/machine_elearning_project/gpu_profiler_agent/workspace/bank_conflict_penalty_cycles.cu -o /root/machine_elearning_project/gpu_profiler_agent/workspace/bank_conflict_penalty_cycles.out
+[Executor] Initiating Cross-Verification (3 trials) to bypass potential OS-level caching/frequency scaling...
+[Executor] [Trial 1/3] Running: ncu --metrics l1tex__data_bank_conflicts_pipe_lsu.sum --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/bank_conflict_penalty_cycles.out
+[Executor] [Trial 2/3] Running: ncu --metrics l1tex__data_bank_conflicts_pipe_lsu.sum --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/bank_conflict_penalty_cycles.out
+[Executor] [Trial 3/3] Running: ncu --metrics l1tex__data_bank_conflicts_pipe_lsu.sum --csv /root/machine_elearning_project/gpu_profiler_agent/workspace/bank_conflict_penalty_cycles.out
+[Executor] Cross-verification completed successfully. Releasing GPU Lock.
 [Reasoner] Starting NCU Analyzer engine...
 
-[Reasoner] --- Analyzing Target: target_boost_clock ---
-  [Step 1] Roofline: SM=99.9%, Mem=10.0%
-  [Step 2] Compute > Memory, but Tensor Cores NOT utilized.
-  [Step 4] Optimization Suggestions:
-    -> Compute Bound: Refactor kernel to use HMMA instructions (FP16/TF32) to leverage Tensor Cores.
-
-[Reasoner] --- Analyzing Target: target_memory_latency ---
+[Reasoner] --- Analyzing Target: dram_latency_cycles ---
+[Reasoner] Extracted physical intrinsic value for dram_latency_cycles: 442.00000000000006
   [Step 1] Roofline: SM=0.0%, Mem=0.0%
-  [Step 3] Warp divergence detected. Efficiency: 1.0/32.
-  [Step 4] Optimization Suggestions:
-    -> Warp Divergence: Reduce if/else branching or group threads by execution path.
+  [Step 4] Optimization Suggestions: None. Code looks optimal!
 
-[Reasoner] --- Analyzing Target: target_effective_bandwidth ---
-  [Step 1] Roofline: SM=30.0%, Mem=85.0%
-  [Step 2] Memory > Compute & DRAM > 70%. Diagnosed as [VRAM Bound].
-  [Step 4] Optimization Suggestions:
-    -> VRAM Bound: Increase data reuse in Shared Memory or Registers to reduce global memory traffic.
+[Reasoner] --- Analyzing Target: max_shmem_per_block_kb ---
+[Reasoner] Extracted physical intrinsic value for max_shmem_per_block_kb: 48.0
+  [Step 1] Roofline: SM=0.0%, Mem=0.0%
+  [Step 4] Optimization Suggestions: None. Code looks optimal!
 
-[Reasoner] --- Analyzing Target: target_bank_conflict ---
-  [Step 1] Roofline: SM=50.0%, Mem=20.0%
-  [Step 2] Compute > Memory, but Tensor Cores NOT utilized.
-  [Step 3] Detected 1024 shared memory bank conflicts.
-  [Step 4] Optimization Suggestions:
-    -> Compute Bound: Refactor kernel to use HMMA instructions (FP16/TF32) to leverage Tensor Cores.
-    -> Bank Conflicts: Pad shared memory arrays or restructure access patterns to avoid strided accesses.
+[Reasoner] --- Analyzing Target: actual_boost_clock_mhz ---
+[Reasoner] Extracted physical intrinsic value for actual_boost_clock_mhz: 833.3333333333334
+[Reasoner] [Anti-Hacking] Detected 833.3333333333334 MHz is significantly lower than standard spec. GPU is locked at a non-standard frequency.
+  [Step 1] Roofline: SM=0.0%, Mem=0.0%
+  [Step 4] Optimization Suggestions: None. Code looks optimal!
+
+[Reasoner] --- Analyzing Target: l2_cache_capacity_kb ---
+[Reasoner] Extracted physical intrinsic value for l2_cache_capacity_kb: 40960.0
+  [Step 1] Roofline: SM=0.0%, Mem=0.0%
+  [Step 4] Optimization Suggestions: None. Code looks optimal!
+
+[Reasoner] --- Analyzing Target: bank_conflict_penalty_cycles ---
+[Reasoner] Extracted physical intrinsic value for bank_conflict_penalty_cycles: 0.0
+  [Step 1] Roofline: SM=0.0%, Mem=0.0%
+  [Step 4] Optimization Suggestions: None. Code looks optimal!

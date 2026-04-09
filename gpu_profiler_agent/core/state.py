@@ -9,6 +9,7 @@ class ExecutionResult(BaseModel):
 
 class WorkflowState(BaseModel):
     targets: List[Dict[str, Any]] = Field(default_factory=list)
+    executable_path: Optional[str] = None
     generated_code_paths: List[str] = Field(default_factory=list)
     execution_results: List[ExecutionResult] = Field(default_factory=list)
     extracted_metrics: Dict[str, Any] = Field(default_factory=dict)

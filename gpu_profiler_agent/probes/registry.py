@@ -2,6 +2,12 @@ from abc import ABC, abstractmethod
 from typing import Dict, Type
 
 class ProbeStrategy(ABC):
+    @property
+    @abstractmethod
+    def required_metrics(self) -> list:
+        """List of NCU metrics required by this probe to execute correctly."""
+        pass
+        
     @abstractmethod
     def generate_cuda_code(self, target: dict) -> str:
         """Generate CUDA code string for the given target."""

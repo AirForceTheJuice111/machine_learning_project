@@ -50,10 +50,12 @@ class NCUAnalyzer:
             self.diagnostics.append(f"[Step 3] Warp divergence detected. Efficiency: {warp_efficiency:.1f}/32.")
             self.suggestions.append("Warp Divergence: Reduce if/else branching or group threads by execution path.")
 
-        # 3. Occupancy Anomaly
+        # 3. Occupancy Anomaly (SM Masking Check)
         theo_occ = self.get_metric("sm__maximum_warps_per_active_cycle_pct", 100.0)
         achieved_occ = self.get_metric("sm__warps_active.avg.pct_of_peak_sustained_active", theo_occ)
-        if (theo_occ - achieved_occ) > 20.0:
+        if theo_occ < 60.0:
+            self.diagnostics.append(f"[Step 3] [Anti-Hacking] Detected low theoretical maximum warps ({theo_occ:.1f}%). Possible SM masking or resource limiting by nvidia-smi/environment variables.")
+        elif (theo_occ - achieved_occ) > 20.0:
             self.diagnostics.append(f"[Step 3] Occupancy gap: Theoretical={theo_occ:.1f}%, Achieved={achieved_occ:.1f}%")
             self.suggestions.append("Occupancy Gap: Check for register pressure, shared memory limits, or unbalanced block scheduling.")
 
@@ -76,6 +78,16 @@ class ReasonerAgent(BaseAgent):
         for target_name, metrics in state.extracted_metrics.items():
             state.add_reasoning(f"\n[Reasoner] --- Analyzing Target: {target_name} ---")
             
+            # Identify final hardware intrinsic value
+            final_value = metrics.get("final_value")
+            if final_value is not None:
+                state.add_reasoning(f"[Reasoner] Extracted physical intrinsic value for {target_name}: {final_value}")
+                if "clock" in target_name and final_value < 1000:
+                    state.add_reasoning(f"[Reasoner] [Anti-Hacking] Detected {final_value} MHz is significantly lower than standard spec. GPU is locked at a non-standard frequency.")
+                
+                # Replace the nested dict with the flat scalar to match expected results.json format
+                state.extracted_metrics[target_name] = final_value
+                
             analyzer = NCUAnalyzer(metrics)
             diagnostics, suggestions = analyzer.analyze()
             

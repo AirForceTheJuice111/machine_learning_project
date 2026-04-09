@@ -20,7 +20,7 @@ async def run_agents(state: WorkflowState, ui: UIRenderer):
     
     # Executor phase
     ui.update_executor_status("ExecutorAgent Compiling & Profiling...")
-    executor = ExecutorAgent(mock_execution=True)
+    executor = ExecutorAgent(mock_execution=False)
     state = await executor.run(state)
     
     # Reasoner phase
@@ -39,8 +39,19 @@ async def main():
     spec_path = Path("target_spec.json")
     if spec_path.exists():
         with open(spec_path, "r") as f:
-            state.targets = json.load(f)
-        state.add_reasoning(f"[System] Loaded {len(state.targets)} targets from target_spec.json")
+            spec_data = json.load(f)
+            
+        # Parse {"targets": ["target1", "target2"], "run": "path/to/exe"} format from MLSYS Doc
+        if isinstance(spec_data, dict):
+            if "targets" in spec_data:
+                state.targets = [{"name": t, "type": t} for t in spec_data["targets"]]
+            if "run" in spec_data:
+                state.executable_path = spec_data["run"]
+                state.add_reasoning(f"[System] Detected provided executable: {state.executable_path}")
+        else:
+            state.targets = spec_data
+            
+        state.add_reasoning(f"[System] Loaded {len(state.targets)} hardware intrinsic targets from target_spec.json")
     else:
         state.add_reasoning(f"[Error] {spec_path} not found.")
         
