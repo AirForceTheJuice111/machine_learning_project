@@ -1,0 +1,60 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.cache/
+
+# Jupyter / notebook artifacts
+.ipynb_checkpoints/
+
+# Logs and runtime files
+*.log
+*.pid
+*.out
+*.err
+
+# Environment / secrets
+.env
+.env.*
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CUDA compiled outputs and binaries
+*.o
+*.obj
+*.so
+*.a
+*.lib
+*.exe
+*.bin
+probe_frequency
+probe_latency
+probe_shmem
+
+# Optional profiling outputs
+*.ncu-rep
+*.qdrep
