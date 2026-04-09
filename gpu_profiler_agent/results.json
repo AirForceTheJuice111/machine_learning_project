@@ -1,7 +1,0 @@
-{
-    "dram_latency_cycles": 442.00000000000006,
-    "max_shmem_per_block_kb": 48.0,
-    "actual_boost_clock_mhz": 833.3333333333334,
-    "l2_cache_capacity_kb": 40960.0,
-    "bank_conflict_penalty_cycles": 0.0
-}
