@@ -1,0 +1,4 @@
+{
+  "error": "Failed to extract JSON",
+  "raw_output": "LLM 调用失败，主循环已安全退出: Request timed out."
+}

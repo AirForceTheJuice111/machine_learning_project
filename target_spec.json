@@ -1,0 +1,8 @@
+{
+  "targets": [
+    "actual_boost_clock_mhz",
+    "bank_conflict_penalty_cycles",
+    "dram_latency_cycles"
+  ],
+  "run": "./build/dummy_matmul.exe"
+}
