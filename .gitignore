@@ -51,9 +51,7 @@ Thumbs.db
 *.lib
 *.exe
 *.bin
-probe_frequency
-probe_latency
-probe_shmem
+
 
 # Optional profiling outputs
 *.ncu-rep
