@@ -22,6 +22,8 @@ EVALUATOR_PROMPT_ADDITION = """
 3. 如果 target_spec 中提供了 run 可执行文件路径，应将其视为动态算子目标，可用 bash_runner 调用 ncu 分析，而不是假设固定算子。
 4. 从探针输出、ncu 日志或程序输出中推断、计算并交叉验证目标数值。
 5. 一旦你确定了所有的指标值，你必须输出一份纯 JSON 格式的最终答案，必须被包裹在 Markdown 的 JSON 代码块中（即 ```json 和 ``` 之间），并且键名必须严格匹配要求。
+6. 如果 compile_and_run_cuda_source 的 run_stdout 中已经明确打印出所有 targets 对应的 `name: value` 结果，你必须立刻停止继续试探，直接整理成最终 JSON 返回。
+7. `run_stderr`、`profile_stdout`、`profile_stderr` 为空并不代表失败；如果所需指标已经在 run_stdout 中出现，就直接收尾。
 
 示例格式：
 ```json
@@ -46,6 +48,56 @@ def extract_json(text: str) -> dict:
         return json.loads(text)
     except json.JSONDecodeError:
         return {}
+
+
+def extract_tool_json(rendered_tool_output: str) -> dict:
+    marker = "\n{"
+    start = rendered_tool_output.find(marker)
+    if start == -1:
+        return {}
+    try:
+        return json.loads(rendered_tool_output[start + 1 :])
+    except json.JSONDecodeError:
+        return {}
+
+
+def extract_numeric_targets_from_text(text: str, targets: list[str]) -> dict[str, float]:
+    results: dict[str, float] = {}
+    for target in targets:
+        pattern = rf"(?im)^\s*{re.escape(target)}\s*:\s*([-+]?\d+(?:\.\d+)?)\s*$"
+        match = re.search(pattern, text)
+        if match:
+            try:
+                results[target] = float(match.group(1))
+            except ValueError:
+                continue
+    return results
+
+
+def fallback_extract_results_from_memory(memory: ConversationMemory, targets: list[str]) -> dict:
+    merged_results: dict[str, float] = {}
+    for message in reversed(memory.messages):
+        if message.get("role") != "tool":
+            continue
+        content = message.get("content", "")
+        if "[compile_and_run_cuda_source] status=ok" not in content:
+            continue
+
+        tool_payload = extract_tool_json(content)
+        candidate_texts = [content]
+        if tool_payload:
+            for key in ("run_stdout", "profile_stdout", "run_stderr", "profile_stderr"):
+                value = tool_payload.get(key, "")
+                if isinstance(value, str) and value.strip():
+                    candidate_texts.append(value)
+
+        for candidate in candidate_texts:
+            merged_results.update(extract_numeric_targets_from_text(candidate, targets))
+
+        if all(target in merged_results for target in targets):
+            return {target: merged_results[target] for target in targets}
+
+    return {}
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Automated Hardware Probe Evaluator")
@@ -121,12 +173,32 @@ def main() -> None:
 
     # Attempt to extract JSON from the final answer
     result_dict = extract_json(final_answer)
+    if not result_dict:
+        fallback_results = fallback_extract_results_from_memory(memory, targets)
+        if fallback_results and all(target in fallback_results for target in targets):
+            result_dict = fallback_results
+            console.print(
+                Panel(
+                    "Agent 未显式输出最终 JSON，但已从成功的工具输出中提取到全部目标结果，已自动写入 results.json。",
+                    title="Fallback Extraction",
+                    border_style="yellow",
+                )
+            )
     
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if not result_dict:
         console.print("[bold red]Agent 未能返回符合格式的 JSON 结果。将保存原始输出作为错误日志。[/bold red]")
         with open(out_path, 'w', encoding='utf-8') as f:
-            json.dump({"error": "Failed to extract JSON", "raw_output": final_answer}, f, indent=2, ensure_ascii=False)
+            json.dump(
+                {
+                    "error": "Failed to extract JSON",
+                    "raw_output": final_answer,
+                    "fallback_partial": fallback_extract_results_from_memory(memory, targets),
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
     else:
         with open(out_path, 'w', encoding='utf-8') as f:
             json.dump(result_dict, f, indent=2, ensure_ascii=False)
