@@ -164,12 +164,13 @@ class ReadFileTool:
 
 @dataclass
 class WriteFileTool:
-    """Writes content to a local file with human confirmation."""
+    """Writes content to a local file, optionally requiring human confirmation."""
 
     approval_handler: ApprovalHandler = default_approval_handler
+    require_approval: bool = True
 
     name: str = "write_file"
-    description: str = "写入本地文件。该操作总是需要人工确认。"
+    description: str = "写入本地文件。可根据运行模式配置是否需要人工确认。"
     parameters_schema: dict[str, object] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -193,12 +194,13 @@ class WriteFileTool:
         path = Path(arguments["path"]).expanduser()
         content = arguments["content"]
 
-        approved = self.approval_handler(f"即将写入文件 {path}，是否继续？")
-        if not approved:
-            return ToolResult(
-                status="rejected",
-                content=f"用户拒绝写入文件: {path}",
-            )
+        if self.require_approval:
+            approved = self.approval_handler(f"即将写入文件 {path}，是否继续？")
+            if not approved:
+                return ToolResult(
+                    status="rejected",
+                    content=f"用户拒绝写入文件: {path}",
+                )
 
         try:
             path.parent.mkdir(parents=True, exist_ok=True)

@@ -17,10 +17,11 @@ EVALUATOR_PROMPT_ADDITION = """
 [注意：你当前处于自动化评测模式。]
 你将收到一份包含多个硬件指标要求的 target_spec.json 内容。
 你的任务是：
-1. 思考如何利用现有的 probe 工具（频率探针、共享内存探针、延迟扫频探针）或者系统命令工具（bash_runner）获取这些指标。
-2. 调度工具并运行探针。
-3. 从探针的原始 CSV/日志中推断、计算或提取出具体数值。
-4. 一旦你确定了所有的指标值，你必须输出一份纯 JSON 格式的最终答案，必须被包裹在 Markdown 的 JSON 代码块中（即 ```json 和 ``` 之间），并且键名必须严格匹配要求。
+1. 不要把仓库里预置的 probe 当作默认 benchmark。应根据当前 target_spec 和 profiling 目标，自主生成最小化 CUDA C++ 探针源码。
+2. 使用 write_file 写入源码，再使用 compile_and_run_cuda_source 编译、运行，必要时开启 ncu profiling。
+3. 如果 target_spec 中提供了 run 可执行文件路径，应将其视为动态算子目标，可用 bash_runner 调用 ncu 分析，而不是假设固定算子。
+4. 从探针输出、ncu 日志或程序输出中推断、计算并交叉验证目标数值。
+5. 一旦你确定了所有的指标值，你必须输出一份纯 JSON 格式的最终答案，必须被包裹在 Markdown 的 JSON 代码块中（即 ```json 和 ``` 之间），并且键名必须严格匹配要求。
 
 示例格式：
 ```json
@@ -72,12 +73,12 @@ def main() -> None:
     if not targets:
         console.print("[yellow]Warning: target_spec.json 中没有找到 targets 列表。[/yellow]")
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    api_key = os.getenv("API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-5.4")
     base_url = os.getenv("OPENAI_BASE_URL")
 
     if not api_key:
-        console.print(Panel("缺少 OPENAI_API_KEY，无法启动评测 Agent。", title="Config Error", border_style="red"))
+        console.print(Panel("缺少 API_KEY，无法启动评测 Agent。", title="Config Error", border_style="red"))
         return
 
     memory = ConversationMemory(
@@ -92,7 +93,10 @@ def main() -> None:
     )
     engine = AgentEngine(
         llm_client=llm_client,
-        tool_registry=build_registry(console),
+        tool_registry=build_registry(
+            console,
+            auto_approve=True,
+        ),
         memory=memory,
         console=console,
         max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "15")),
@@ -105,10 +109,10 @@ def main() -> None:
     if run_executable:
         prompt += (
             f"目标测试算子路径（run）：{run_executable}\n"
-            "如果你需要进行算子级的指标分析，请优先通过 ncu 对此可执行文件进行分析（例如：使用 bash_runner 执行 ncu 命令获取详细指标）。\n\n"
+            "如果你需要进行算子级的指标分析，请优先通过 ncu 对此可执行文件进行分析，并把得到的指标与自生成探针结果交叉验证。\n\n"
         )
     prompt += (
-        "请按需编译和运行现有的 CUDA probe（或执行其他命令），推断上述数值，"
+        "请根据目标自主生成并编译运行 CUDA 探针，必要时结合 ncu 和 run 可执行文件进行分析，推断上述数值，"
         "并确保在最终回复里输出标准的 JSON Block。"
     )
 

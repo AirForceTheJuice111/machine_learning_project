@@ -10,11 +10,7 @@ from rich.prompt import Confirm, Prompt
 from agent_framework.core.engine import AgentEngine
 from agent_framework.core.llm_client import OpenAILLMClient
 from agent_framework.core.memory import ConversationMemory
-from agent_framework.tools.cuda_probe_tools import (
-    RunProbeFrequencyTool,
-    RunProbeLatencyTool,
-    RunProbeShmemTool,
-)
+from agent_framework.tools.cuda_probe_tools import CompileAndRunCudaSourceTool
 from agent_framework.tools.system_tools import BashRunnerTool, ReadFileTool, WriteFileTool
 from agent_framework.tools.tool_registry import ToolRegistry
 
@@ -27,40 +23,49 @@ SYSTEM_PROMPT = """你是一个本地 GPU 性能分析 Agent 的执行核心。
 3. 当工具返回错误、超时、用户拒绝或日志截断时，不要崩溃，不要假装成功，要明确反思并调整策略。
 4. 优先做小步、安全、可验证的动作。
 5. 如果需要修改文件，优先先读取现有内容再写入。
-6. 如果需要测量 GPU 实际频率，优先使用专用工具 run_probe_frequency，而不是手动编译并解析 stdout。
-7. 如果需要测量 shared memory bank conflict，优先使用专用工具 run_probe_shmem，而不是手动编译并解析 stdout。
-8. 如果需要测量缓存或全局内存延迟曲线，优先使用专用工具 run_probe_latency，而不是手动编译并解析 stdout。
+6. 不要依赖仓库中预置 benchmark 作为默认工作流。若需要硬件探测，应先根据当前目标自主生成最小化 CUDA C++ 探针源码。
+7. 生成源码后，优先使用 write_file 写入工作区，再使用 compile_and_run_cuda_source 编译、运行，必要时开启 ncu profiling。
+8. 如果输入里提供了待分析的 run 可执行文件路径，应把它视为动态 profiling 目标，不要假设固定算子名称。
 9. 在任务可以完成时，直接给出最终答案，不要无休止调用工具。
 """
 
 
-def build_registry(console: Console) -> ToolRegistry:
+def build_registry(
+    console: Console,
+    *,
+    auto_approve: bool = False,
+) -> ToolRegistry:
     project_root = Path(__file__).resolve().parent.parent
 
     def approval_handler(prompt: str) -> bool:
+        if auto_approve:
+            return True
         console.print(Panel(prompt, title="Human Approval", border_style="yellow"))
         return Confirm.ask("是否批准执行？", default=False, console=console)
 
     registry = ToolRegistry()
     registry.register(BashRunnerTool(approval_handler=approval_handler))
     registry.register(ReadFileTool())
-    registry.register(WriteFileTool(approval_handler=approval_handler))
-    registry.register(RunProbeFrequencyTool(default_project_root=project_root))
-    registry.register(RunProbeShmemTool(default_project_root=project_root))
-    registry.register(RunProbeLatencyTool(default_project_root=project_root))
+    registry.register(
+        WriteFileTool(
+            approval_handler=approval_handler,
+            require_approval=not auto_approve,
+        )
+    )
+    registry.register(CompileAndRunCudaSourceTool(default_project_root=project_root))
     return registry
 
 
 def main() -> None:
     console = Console()
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    api_key = os.getenv("API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-5.4")
     base_url = os.getenv("OPENAI_BASE_URL")
 
     if not api_key:
         console.print(
             Panel(
-                "缺少 OPENAI_API_KEY，无法启动 Agent。",
+                "缺少 API_KEY，无法启动 Agent。",
                 title="Configuration Error",
                 border_style="red",
             )
