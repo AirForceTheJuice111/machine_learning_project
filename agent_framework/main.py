@@ -11,7 +11,7 @@ from agent_framework.core.engine import AgentEngine
 from agent_framework.core.llm_client import OpenAILLMClient
 from agent_framework.core.memory import ConversationMemory
 from agent_framework.tools.cuda_probe_tools import CompileAndRunCudaSourceTool
-from agent_framework.tools.system_tools import BashRunnerTool, ReadFileTool, WriteFileTool
+from agent_framework.tools.system_tools import ReadFileTool, WriteFileTool
 from agent_framework.tools.tool_registry import ToolRegistry
 
 
@@ -23,9 +23,9 @@ SYSTEM_PROMPT = """你是一个本地 GPU 性能分析 Agent 的执行核心。
 3. 当工具返回错误、超时、用户拒绝或日志截断时，不要崩溃，不要假装成功，要明确反思并调整策略。
 4. 优先做小步、安全、可验证的动作。
 5. 如果需要修改文件，优先先读取现有内容再写入。
-6. 不要依赖仓库中预置 benchmark 作为默认工作流。若需要硬件探测，应先根据当前目标自主生成最小化 CUDA C++ 探针源码。
-7. 生成源码后，优先使用 write_file 写入工作区，再使用 compile_and_run_cuda_source 编译、运行，必要时开启 ncu profiling。
-8. 如果输入里提供了待分析的 run 可执行文件路径，应把它视为动态 profiling 目标，不要假设固定算子名称。
+6. 严禁使用外部 benchmark，严禁下载第三方 benchmark；所有测量都必须基于你当前自主生成的本地 CUDA C++ 源码。
+7. 自生成 CUDA 源码必须写入项目根目录下的 `generated_cuda/` 专用目录，再使用 compile_and_run_cuda_source 编译、运行；如需 ncu，只能用于分析你自己刚生成并编译出的本地二进制。
+8. 不要依赖 target_spec 中的 run、外部可执行文件或互联网资源来完成测量。
 9. 在任务可以完成时，直接给出最终答案，不要无休止调用工具。
 """
 
@@ -44,7 +44,6 @@ def build_registry(
         return Confirm.ask("是否批准执行？", default=False, console=console)
 
     registry = ToolRegistry()
-    registry.register(BashRunnerTool(approval_handler=approval_handler))
     registry.register(ReadFileTool())
     registry.register(
         WriteFileTool(

@@ -84,6 +84,7 @@ class CompileAndRunCudaSourceTool:
 
     def run(self, arguments: dict) -> ToolResult:
         project_root = self.default_project_root
+        generated_cuda_root = project_root / "generated_cuda"
         source_path = Path(arguments["source_path"]).expanduser()
         binary_path = Path(arguments.get("binary_path", source_path.with_suffix(""))).expanduser()
         nvcc_path = arguments.get("nvcc_path", "nvcc")
@@ -96,6 +97,31 @@ class CompileAndRunCudaSourceTool:
         ncu_path = arguments.get("ncu_path", "ncu")
         ncu_metrics = arguments.get("ncu_metrics", "")
         ncu_set = arguments.get("ncu_set", "")
+
+        source_path = self._resolve_within_project(source_path)
+        binary_path = self._resolve_within_project(binary_path)
+
+        if source_path is None or binary_path is None:
+            return ToolResult(
+                status="rejected",
+                content="为严格禁止外部 benchmark，source_path 和 binary_path 必须位于项目目录内。",
+            )
+        try:
+            source_path.relative_to(generated_cuda_root.resolve())
+            binary_path.relative_to(generated_cuda_root.resolve())
+        except ValueError:
+            return ToolResult(
+                status="rejected",
+                content=(
+                    "自生成 CUDA 代码及其编译产物必须位于专用目录 "
+                    f"{generated_cuda_root} 内。"
+                ),
+            )
+        if source_path.suffix.lower() != ".cu":
+            return ToolResult(
+                status="rejected",
+                content=f"仅允许编译本地自主生成的 CUDA 源文件（.cu），当前路径非法: {source_path}",
+            )
 
         if not source_path.exists():
             return ToolResult(status="error", content=f"CUDA 源文件不存在: {source_path}")
@@ -150,6 +176,17 @@ class CompileAndRunCudaSourceTool:
                 indent=2,
             ),
         )
+
+    def _resolve_within_project(self, path: Path) -> Path | None:
+        if not path.is_absolute():
+            path = (self.default_project_root / path).resolve()
+        else:
+            path = path.resolve()
+        try:
+            path.relative_to(self.default_project_root.resolve())
+        except ValueError:
+            return None
+        return path
 
     def _compile_source(
         self,

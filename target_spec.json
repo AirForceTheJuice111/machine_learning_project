@@ -9,6 +9,5 @@
     "global_memory_bandwidth_gbps",
     "shared_memory_bandwidth_gbps",
     "max_shmem_per_block_kb"
-  ],
-  "run": "./build/dummy_matmul.exe"
+  ]
 }

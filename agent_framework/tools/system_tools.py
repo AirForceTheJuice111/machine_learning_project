@@ -25,8 +25,8 @@ class BashRunnerTool:
 
     name: str = "bash_runner"
     description: str = (
-        "在本地 shell 中执行命令。适合编译、运行程序和检查系统状态。"
-        "命令有超时保护，高风险命令会要求人工确认。"
+        "在本地 shell 中执行受限的诊断命令。"
+        "严禁下载、安装、克隆或调用外部 benchmark。"
     )
     parameters_schema: dict[str, object] = field(init=False)
 
@@ -55,6 +55,13 @@ class BashRunnerTool:
         command = arguments["command"]
         cwd = arguments.get("cwd")
         timeout = int(arguments.get("timeout", self.default_timeout))
+
+        blocked_reason = self._get_policy_block_reason(command)
+        if blocked_reason:
+            return ToolResult(
+                status="rejected",
+                content=f"命令被策略拒绝: {blocked_reason}\ncommand: {command}",
+            )
 
         if self._is_high_risk_command(command):
             approved = self.approval_handler(
@@ -125,6 +132,26 @@ class BashRunnerTool:
         ]
         lowered = command.lower()
         return any(token in lowered for token in risky_tokens)
+
+    @staticmethod
+    def _get_policy_block_reason(command: str) -> str | None:
+        lowered = command.lower()
+        blocked_tokens = {
+            "curl ": "禁止下载外部资源或第三方 benchmark",
+            "wget ": "禁止下载外部资源或第三方 benchmark",
+            "invoke-webrequest": "禁止通过 PowerShell 下载外部资源或 benchmark",
+            "start-bitstransfer": "禁止通过 PowerShell 下载外部资源或 benchmark",
+            "certutil ": "禁止通过 certutil 下载外部资源或 benchmark",
+            "git clone": "禁止克隆外部仓库或 benchmark",
+            "pip install": "禁止在 Agent 运行中联网安装第三方依赖或 benchmark",
+            "python -m pip": "禁止在 Agent 运行中联网安装第三方依赖或 benchmark",
+            "winget ": "禁止通过包管理器安装外部工具或 benchmark",
+            "choco ": "禁止通过包管理器安装外部工具或 benchmark",
+        }
+        for token, reason in blocked_tokens.items():
+            if token in lowered:
+                return reason
+        return None
 
 
 @dataclass
