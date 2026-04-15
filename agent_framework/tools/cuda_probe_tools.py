@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -198,7 +199,8 @@ class CompileAndRunCudaSourceTool:
         timeout: int,
     ) -> ToolResult | str:
         binary_path.parent.mkdir(parents=True, exist_ok=True)
-        command = [nvcc_path, "-O3", "-std=c++17", *extra_nvcc_flags, str(source_path), "-o", str(binary_path)]
+        resolved_nvcc = self._resolve_command_path(nvcc_path)
+        command = [resolved_nvcc, "-O3", "-std=c++17", *extra_nvcc_flags, str(source_path), "-o", str(binary_path)]
         try:
             completed = subprocess.run(
                 command,
@@ -218,6 +220,52 @@ class CompileAndRunCudaSourceTool:
                 ).strip(),
             )
         except subprocess.CalledProcessError as exc:
+            if self._should_retry_with_unsupported_compiler(exc, extra_nvcc_flags):
+                retry_flags = [*extra_nvcc_flags, "-allow-unsupported-compiler"]
+                retry_command = [
+                    resolved_nvcc,
+                    "-O3",
+                    "-std=c++17",
+                    *retry_flags,
+                    str(source_path),
+                    "-o",
+                    str(binary_path),
+                ]
+                try:
+                    completed = subprocess.run(
+                        retry_command,
+                        cwd=str(self.default_project_root),
+                        text=True,
+                        capture_output=True,
+                        timeout=timeout,
+                        check=True,
+                    )
+                    retry_note = (
+                        "检测到当前 MSVC 版本超出 CUDA 官方支持范围，"
+                        "已自动使用 -allow-unsupported-compiler 重试并成功。\n"
+                    )
+                    return retry_note + (completed.stderr.strip() or "")
+                except subprocess.TimeoutExpired as retry_exc:
+                    return ToolResult(
+                        status="timeout",
+                        content=(
+                            f"动态 CUDA 源文件编译超时({timeout}s)，且自动追加 "
+                            "-allow-unsupported-compiler 后仍未完成。\n"
+                            f"stdout:\n{retry_exc.stdout or ''}\n"
+                            f"stderr:\n{retry_exc.stderr or ''}"
+                        ).strip(),
+                    )
+                except subprocess.CalledProcessError as retry_exc:
+                    return ToolResult(
+                        status="error",
+                        content=(
+                            "检测到当前 MSVC 版本超出 CUDA 官方支持范围，"
+                            "已自动追加 -allow-unsupported-compiler 重试，但仍编译失败。\n"
+                            f"退出码: {retry_exc.returncode}\n"
+                            f"stdout:\n{retry_exc.stdout or ''}\n"
+                            f"stderr:\n{retry_exc.stderr or ''}"
+                        ).strip(),
+                    )
             return ToolResult(
                 status="error",
                 content=(
@@ -227,7 +275,10 @@ class CompileAndRunCudaSourceTool:
                 ).strip(),
             )
         except FileNotFoundError:
-            return ToolResult(status="error", content=f"找不到 nvcc: {nvcc_path}")
+            return ToolResult(
+                status="error",
+                content=f"找不到 nvcc: {nvcc_path}。如在 Windows 上使用，请传入 nvcc.exe 的完整路径或确保其已加入 PATH。",
+            )
         except Exception as exc:  # noqa: BLE001
             return ToolResult(status="error", content=f"编译动态 CUDA 源文件时发生系统异常: {exc}")
         return completed.stderr.strip()
@@ -280,7 +331,8 @@ class CompileAndRunCudaSourceTool:
         ncu_set: str,
         timeout: int,
     ) -> ToolResult | tuple[str, str]:
-        command = [ncu_path]
+        resolved_ncu = self._resolve_command_path(ncu_path)
+        command = [resolved_ncu]
         if ncu_metrics:
             command.extend(["--metrics", ncu_metrics])
         elif ncu_set:
@@ -317,7 +369,47 @@ class CompileAndRunCudaSourceTool:
                 ).strip(),
             )
         except FileNotFoundError:
-            return ToolResult(status="error", content=f"找不到 ncu: {ncu_path}")
+            return ToolResult(
+                status="error",
+                content=(
+                    f"找不到 ncu: {ncu_path}。"
+                    "在 Windows 上，如果 PATH 中只有 ncu.bat / ncu.cmd，"
+                    "请传入完整路径，或确保当前进程环境可通过 PATH 解析到该批处理文件。"
+                ),
+            )
         except Exception as exc:  # noqa: BLE001
             return ToolResult(status="error", content=f"执行 ncu profiling 时发生系统异常: {exc}")
         return completed.stdout, completed.stderr
+
+    @staticmethod
+    def _resolve_command_path(command: str) -> str:
+        path = Path(command).expanduser()
+        if path.is_absolute():
+            return str(path)
+
+        resolved = shutil.which(command)
+        if resolved:
+            return resolved
+
+        suffixes = ("", ".exe", ".bat", ".cmd")
+        for suffix in suffixes:
+            candidate = command if not suffix or command.lower().endswith(suffix) else f"{command}{suffix}"
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+
+        return command
+
+    @staticmethod
+    def _should_retry_with_unsupported_compiler(
+        exc: subprocess.CalledProcessError,
+        extra_nvcc_flags: list[str],
+    ) -> bool:
+        if "-allow-unsupported-compiler" in extra_nvcc_flags:
+            return False
+
+        stderr = (exc.stderr or "").lower()
+        return (
+            "unsupported microsoft visual studio version" in stderr
+            or "allow-unsupported-compiler" in stderr
+        )

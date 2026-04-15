@@ -26,7 +26,8 @@ SYSTEM_PROMPT = """你是一个本地 GPU 性能分析 Agent 的执行核心。
 6. 严禁使用外部 benchmark，严禁下载第三方 benchmark；所有测量都必须基于你当前自主生成的本地 CUDA C++ 源码。
 7. 自生成 CUDA 源码必须写入项目根目录下的 `generated_cuda/` 专用目录，再使用 compile_and_run_cuda_source 编译、运行；如需 ncu，只能用于分析你自己刚生成并编译出的本地二进制。
 8. 不要依赖 target_spec 中的 run、外部可执行文件或互联网资源来完成测量。
-9. 在任务可以完成时，直接给出最终答案，不要无休止调用工具。
+9. 如果用户给出某个 target 的设计约束或测量思路，应把它理解为编码约束而不是代码模板；具体 kernel 结构、参数扫描与结果换算仍需你自主决定。
+10. 在任务可以完成时，直接给出最终答案，不要无休止调用工具。
 """
 
 
@@ -86,7 +87,7 @@ def main() -> None:
         tool_registry=build_registry(console),
         memory=memory,
         console=console,
-        max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "10")),
+        max_runtime_seconds=float(os.getenv("AGENT_MAX_RUNTIME_SECONDS", "600")),
     )
 
     console.print(

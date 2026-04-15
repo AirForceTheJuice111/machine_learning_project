@@ -1,13 +1,8 @@
 {
   "targets": [
-    "actual_boost_clock_mhz",
-    "bank_conflict_penalty_cycles",
-    "dram_latency_cycles",
-    "l2_latency_cycles",
     "l1_latency_cycles",
-    "l2_cache_capacity_kb",
-    "global_memory_bandwidth_gbps",
-    "shared_memory_bandwidth_gbps",
-    "max_shmem_per_block_kb"
+    "l2_latency_cycles",
+    "dram_latency_cycles",
+    "l2_cache_capacity_mb"
   ]
 }
