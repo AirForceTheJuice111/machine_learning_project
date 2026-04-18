@@ -102,6 +102,25 @@ def fallback_extract_results_from_memory(memory: ConversationMemory, targets: li
     return {}
 
 
+def write_json_output(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def write_failure_output(
+    *,
+    console: Console,
+    out_path: Path,
+    title: str,
+    message: str,
+    **extra_fields: Any,
+) -> None:
+    payload = {"error": message, **extra_fields}
+    write_json_output(out_path, payload)
+    console.print(Panel(message, title=title, border_style="red"))
+
+
 def slugify_target(target: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", target.strip())
     slug = slug.strip("._")
@@ -386,22 +405,42 @@ def main() -> None:
     console = Console()
     spec_path = Path(args.target_spec).resolve()
     out_path = Path(args.output).resolve()
+    project_root = Path(__file__).resolve().parent.parent
+    generated_cuda_dir = (project_root / "generated_cuda").resolve()
 
     if not spec_path.exists():
-        console.print(Panel(f"Error: 找不到文件 {spec_path}", title="File Not Found", border_style="red"))
+        write_failure_output(
+            console=console,
+            out_path=out_path,
+            title="File Not Found",
+            message=f"Error: 找不到文件 {spec_path}",
+            target_spec_path=str(spec_path),
+        )
         return
 
     with open(spec_path, 'r', encoding='utf-8') as f:
         try:
             target_spec = json.load(f)
         except json.JSONDecodeError as exc:
-            console.print(Panel(f"解析 {spec_path} 失败: {exc}", title="JSON Error", border_style="red"))
+            write_failure_output(
+                console=console,
+                out_path=out_path,
+                title="JSON Error",
+                message=f"解析 {spec_path} 失败: {exc}",
+                target_spec_path=str(spec_path),
+            )
             return
 
     targets = target_spec.get("targets", [])
     run_executable = target_spec.get("run", "")
     if not targets:
-        console.print("[yellow]Warning: target_spec.json 中没有找到 targets 列表。[/yellow]")
+        write_failure_output(
+            console=console,
+            out_path=out_path,
+            title="Invalid Target Spec",
+            message="target_spec.json 中没有找到 targets 列表。",
+            target_spec_path=str(spec_path),
+        )
         return
 
     api_key = os.getenv("API_KEY")
@@ -409,7 +448,13 @@ def main() -> None:
     base_url = os.getenv("BASE_URL") or os.getenv("OPENAI_BASE_URL")
 
     if not api_key:
-        console.print(Panel("缺少 API_KEY，无法启动评测 Agent。", title="Config Error", border_style="red"))
+        write_failure_output(
+            console=console,
+            out_path=out_path,
+            title="Config Error",
+            message="缺少 API_KEY，无法启动评测 Agent。",
+            target_spec_path=str(spec_path),
+        )
         return
 
     max_tool_output_chars = int(os.getenv("AGENT_MAX_TOOL_CHARS", "6000"))
@@ -420,7 +465,6 @@ def main() -> None:
         base_url=base_url,
         temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.1")),
     )
-    generated_cuda_dir = (spec_path.parent / "generated_cuda").resolve()
     generated_cuda_dir.mkdir(parents=True, exist_ok=True)
 
     console.print(
@@ -453,9 +497,7 @@ def main() -> None:
                 "elapsed_seconds": time.monotonic() - evaluation_start_time,
                 "time_budget_seconds": total_runtime_seconds,
             }
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(failure_payload, f, indent=2, ensure_ascii=False)
+            write_json_output(out_path, failure_payload)
             console.print(
                 Panel(
                     failure_payload["error"],
@@ -528,9 +570,7 @@ def main() -> None:
                 "partial_results": aggregated_results,
                 "ignored_run": run_executable,
             }
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(failure_payload, f, indent=2, ensure_ascii=False)
+            write_json_output(out_path, failure_payload)
             console.print(
                 Panel(
                     failure_payload["error"],
@@ -551,9 +591,7 @@ def main() -> None:
             "raw_output": final_answer,
         }
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(aggregated_results, f, indent=2, ensure_ascii=False)
+    write_json_output(out_path, aggregated_results)
     details_path = None
     if not args.skip_details_output:
         details_path = out_path.with_name(f"{out_path.stem}.details.json")
