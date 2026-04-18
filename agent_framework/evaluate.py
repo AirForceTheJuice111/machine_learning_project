@@ -374,8 +374,13 @@ def build_target_completion_checker(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Automated Hardware Probe Evaluator")
-    parser.add_argument("--target-spec", type=str, required=True, help="Path to target_spec.json")
-    parser.add_argument("--output", type=str, default="results.json", help="Path to write results.json")
+    parser.add_argument("--target-spec", type=str, default="/target/target_spec.json", help="Path to target_spec.json")
+    parser.add_argument("--output", type=str, default="/workspace/output.json", help="Path to write final output file")
+    parser.add_argument(
+        "--skip-details-output",
+        action="store_true",
+        help="Do not emit the secondary details output file.",
+    )
     args = parser.parse_args()
 
     console = Console()
@@ -400,8 +405,8 @@ def main() -> None:
         return
 
     api_key = os.getenv("API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-5.4")
-    base_url = os.getenv("OPENAI_BASE_URL")
+    model = os.getenv("BASE_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.4")
+    base_url = os.getenv("BASE_URL") or os.getenv("OPENAI_BASE_URL")
 
     if not api_key:
         console.print(Panel("缺少 API_KEY，无法启动评测 Agent。", title="Config Error", border_style="red"))
@@ -549,12 +554,17 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(aggregated_results, f, indent=2, ensure_ascii=False)
-    details_path = out_path.with_name(f"{out_path.stem}.details.json")
-    with open(details_path, "w", encoding="utf-8") as f:
-        json.dump(detailed_results, f, indent=2, ensure_ascii=False)
+    details_path = None
+    if not args.skip_details_output:
+        details_path = out_path.with_name(f"{out_path.stem}.details.json")
+        with open(details_path, "w", encoding="utf-8") as f:
+            json.dump(detailed_results, f, indent=2, ensure_ascii=False)
+    completion_message = f"结果已成功写入: {out_path}"
+    if details_path is not None:
+        completion_message += f"\n详细结果已写入: {details_path}"
     console.print(
         Panel(
-            f"结果已成功写入: {out_path}\n详细结果已写入: {details_path}",
+            completion_message,
             title="Evaluation Completed",
             border_style="green",
         )

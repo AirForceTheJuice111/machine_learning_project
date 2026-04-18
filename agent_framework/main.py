@@ -59,8 +59,8 @@ def build_registry(
 def main() -> None:
     console = Console()
     api_key = os.getenv("API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-5.4")
-    base_url = os.getenv("OPENAI_BASE_URL")
+    model = os.getenv("BASE_MODEL") or os.getenv("OPENAI_MODEL", "gpt-5.4")
+    base_url = os.getenv("BASE_URL") or os.getenv("OPENAI_BASE_URL")
 
     if not api_key:
         console.print(
