@@ -283,6 +283,65 @@ def _validate_result_path(
     return resolved_path, None
 
 
+def normalize_family_result_dict(
+    *,
+    family: str,
+    family_targets: list[str],
+    result_dict: dict[str, Any],
+    execution_info: dict[str, Any],
+) -> tuple[dict[str, Any], str | None]:
+    normalized = dict(result_dict)
+    targets_payload = normalized.get("targets")
+    if not isinstance(targets_payload, dict):
+        return normalized, None
+
+    normalized_targets: dict[str, dict[str, Any]] = {}
+    for target, payload in targets_payload.items():
+        observed_runs = execution_info["target_runs"].get(target, [])
+        latest_run = observed_runs[-1] if observed_runs else None
+        default_program_args = latest_run["program_args"] if latest_run else []
+        default_mode = (
+            infer_mode_from_program_args(default_program_args, target)
+            if latest_run
+            else target
+        )
+
+        if isinstance(payload, (int, float)):
+            normalized_targets[target] = {
+                "value": float(payload),
+                "mode": default_mode,
+                "program_args": default_program_args,
+                "used_ncu_analysis": execution_info["ncu_runs"] >= 1,
+                "evidence_summary": "结果由共享 benchmark 输出得到，补充元数据由评测器自动归一化。",
+            }
+            continue
+
+        if isinstance(payload, dict):
+            if "value" not in payload:
+                return normalized, f"target `{target}` 缺少字段: ['value']"
+            if not isinstance(payload["value"], (int, float)):
+                return normalized, f"target `{target}` 的 value 必须是数字"
+            program_args = payload.get("program_args", default_program_args)
+            if not isinstance(program_args, list):
+                return normalized, f"target `{target}` 的 program_args 必须是字符串数组"
+            program_args = normalize_program_args(program_args)
+            normalized_targets[target] = {
+                "value": float(payload["value"]),
+                "mode": payload.get("mode") or infer_mode_from_program_args(program_args, target),
+                "program_args": program_args,
+                "used_ncu_analysis": bool(payload.get("used_ncu_analysis", execution_info["ncu_runs"] >= 1)),
+                "evidence_summary": payload.get("evidence_summary")
+                or "结果由共享 benchmark 输出得到，补充元数据由评测器自动归一化。",
+            }
+            continue
+
+        return normalized, f"target `{target}` 的结果必须是数字或对象"
+
+    normalized["family"] = normalized.get("family", family)
+    normalized["targets"] = normalized_targets
+    return normalized, None
+
+
 def validate_family_result(
     *,
     family: str,
@@ -291,6 +350,14 @@ def validate_family_result(
     family_workspace: Path,
     execution_info: dict[str, Any],
 ) -> tuple[bool, str]:
+    result_dict, normalization_error = normalize_family_result_dict(
+        family=family,
+        family_targets=family_targets,
+        result_dict=result_dict,
+        execution_info=execution_info,
+    )
+    if normalization_error:
+        return False, normalization_error
     required_keys = {"family", "benchmark_source_path", "binary_path", "targets"}
     missing = required_keys - set(result_dict)
     if missing:
@@ -351,8 +418,6 @@ def validate_family_result(
 
     for target in family_targets:
         payload = targets_payload[target]
-        if not isinstance(payload, dict):
-            return False, f"target `{target}` 的结果必须是对象"
         required_target_keys = {"value", "mode", "program_args", "used_ncu_analysis", "evidence_summary"}
         missing_target_keys = required_target_keys - set(payload)
         if missing_target_keys:
@@ -446,6 +511,14 @@ def build_family_completion_checker(*, family: str, family_targets: list[str], f
         validation_error: str | None = None
 
         if result_dict:
+            result_dict, normalization_error = normalize_family_result_dict(
+                family=family,
+                family_targets=family_targets,
+                result_dict=result_dict,
+                execution_info=execution_info,
+            )
+            if normalization_error is not None:
+                validation_error = normalization_error
             is_valid, validation_error = validate_family_result(
                 family=family,
                 family_targets=family_targets,
@@ -644,6 +717,18 @@ def main() -> None:
             return
         result_dict = extract_json(final_answer)
         execution_info = analyze_family_execution(engine.memory, family_workspace, family_targets)
+        if result_dict:
+            result_dict, normalization_error = normalize_family_result_dict(
+                family=family,
+                family_targets=family_targets,
+                result_dict=result_dict,
+                execution_info=execution_info,
+            )
+            if normalization_error:
+                result_dict = {
+                    **result_dict,
+                    "_normalization_error": normalization_error,
+                }
 
         if not result_dict:
             result_dict = synthesize_family_result_from_execution(
