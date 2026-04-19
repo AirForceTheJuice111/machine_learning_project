@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
-from openai import OpenAI
+from openai import APIConnectionError, APITimeoutError, OpenAI
 
 
 @dataclass
@@ -36,20 +37,35 @@ class OpenAILLMClient:
     ) -> None:
         self.model = model
         self.temperature = temperature
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.request_timeout_seconds = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "180"))
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=self.request_timeout_seconds,
+        )
 
     def complete(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> LLMResponse:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
-            temperature=self.temperature,
-        )
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+                temperature=self.temperature,
+            )
+        except APITimeoutError as exc:
+            raise RuntimeError(
+                "LLM 请求超时。请检查 BASE_URL / 网络连通性，或增大环境变量 "
+                "LLM_REQUEST_TIMEOUT_SECONDS 后重试。"
+            ) from exc
+        except APIConnectionError as exc:
+            raise RuntimeError(
+                "LLM 连接失败。请检查 BASE_URL 是否正确、网络是否可达，以及代理/防火墙配置。"
+            ) from exc
         message = response.choices[0].message
         tool_calls = []
         assistant_tool_calls: list[dict[str, Any]] = []

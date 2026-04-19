@@ -3,35 +3,26 @@ set -euo pipefail
 
 cd /workspace
 
+missing_packages="$(
 python3 - <<'PY'
-import importlib
-import subprocess
-import sys
-
 missing = []
-for module_name, package_name in [("openai", "openai"), ("rich", "rich")]:
+for module_name in ("openai", "rich"):
     try:
-        importlib.import_module(module_name)
-    except Exception:
-        missing.append(package_name)
-
-if missing:
-    subprocess.check_call(
-        [
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            *missing,
-            "-i",
-            "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple",
-            "--default-timeout",
-            "0.3",
-        ]
-    )
+        __import__(module_name)
+    except ModuleNotFoundError:
+        missing.append(module_name)
+print(" ".join(missing))
 PY
+)"
+
+if [ -n "${missing_packages}" ]; then
+  python3 -m pip install --no-input --default-timeout 60 ${missing_packages} \
+    || python3 -m pip install --no-input ${missing_packages}
+fi
+
+export PYTHONPATH="/workspace${PYTHONPATH:+:${PYTHONPATH}}"
 
 python3 -m agent_framework.evaluate \
   --target-spec /target/target_spec.json \
   --output /workspace/output.json \
-  --skip-details-output
+  --skip-details-output | tee /workspace/results.log

@@ -1,6 +1,52 @@
 from __future__ import annotations
 
 
+TARGET_FAMILY_MAP: dict[str, str] = {
+    "l1_latency_cycles": "latency_family",
+    "l2_latency_cycles": "latency_family",
+    "dram_latency_cycles": "latency_family",
+    "l2_cache_capacity_kb": "latency_family",
+    "l2_cache_capacity_mb": "latency_family",
+    "global_memory_bandwidth_gbps": "bandwidth_family",
+    "global_mem_peak_gbps": "bandwidth_family",
+    "vram_peak_gbps": "bandwidth_family",
+    "shared_memory_bandwidth_gbps": "bandwidth_family",
+    "shared_mem_peak_gbps": "bandwidth_family",
+    "actual_boost_clock_mhz": "clock_family",
+    "bank_conflict_penalty_cycles": "bank_conflict_family",
+    "max_shmem_per_block_kb": "resource_limit_family",
+}
+
+
+FAMILY_DESIGN_CONSTRAINTS: dict[str, dict[str, str]] = {
+    "latency_family": {
+        "goal": "用一份共享的 latency/working-set benchmark 同时覆盖 L1、L2、DRAM latency 与 L2 容量 cliff。",
+        "must": "优先生成一个支持多个 mode 的 probe，例如 l1、l2、dram、capacity_sweep；应尽量复用同一份 .cu 和同一二进制。",
+        "avoid": "不要为同一家族里的每个 target 各写一份完全独立的 benchmark，也不要用吞吐型实验代替 latency 实验。",
+    },
+    "bandwidth_family": {
+        "goal": "用一份共享的 bandwidth benchmark 覆盖 global/VRAM/shared memory 的峰值带宽测量。",
+        "must": "优先生成一个支持多个 mode 的 probe，例如 global、vram、shared；同一二进制通过不同参数切换测量路径。",
+        "avoid": "不要把缓存命中主导的小数据测试结果当作峰值带宽，也不要把 shared memory 和 global memory 路径混在同一个 mode 里。",
+    },
+    "clock_family": {
+        "goal": "用一份 compute-heavy benchmark 估算持续负载下的实际 boost 频率。",
+        "must": "单独生成适合持续算术负载的 probe，必要时支持 warmup 与 measured 两种 mode。",
+        "avoid": "不要直接查规格表，不要把不合理量级的 cycles/time 结果当成真实核心频率。",
+    },
+    "bank_conflict_family": {
+        "goal": "用一份 shared-memory benchmark 量化 bank conflict penalty。",
+        "must": "优先在同一二进制中支持 conflict_free 与 conflict_heavy 两种 mode，再比较差值。",
+        "avoid": "不要把完全不同的 kernel 混在一起导致无法归因。",
+    },
+    "resource_limit_family": {
+        "goal": "用一份资源探测 benchmark 测量 block 级共享内存上限。",
+        "must": "生成支持参数扫描的 probe，在同一程序中逐步提高动态 shared memory 请求量。",
+        "avoid": "不要只读取 API 报告值，也不要把 unrelated benchmark 混进来。",
+    },
+}
+
+
 TARGET_DESIGN_CONSTRAINTS: dict[str, dict[str, str]] = {
     "actual_boost_clock_mhz": {
         "goal": "在持续算术负载下估算稳定核心频率，而不是读取规格表或静态属性。",
@@ -88,4 +134,58 @@ def build_target_design_guidance(targets: list[str]) -> str:
         lines.append(f"- 必须满足: {constraints['must']}")
         lines.append(f"- 禁止或避免: {constraints['avoid']}")
     lines.append("你需要把这些约束转化为当前 GPU 上可执行的 CUDA C++ micro-benchmark，而不是照抄固定实现。")
+    return "\n".join(lines)
+
+
+def infer_target_family(target: str) -> str:
+    if target in TARGET_FAMILY_MAP:
+        return TARGET_FAMILY_MAP[target]
+
+    target_lower = target.lower()
+    if "latency" in target_lower or "cache_capacity" in target_lower:
+        return "latency_family"
+    if "bandwidth" in target_lower or "peak_gbps" in target_lower:
+        return "bandwidth_family"
+    if "clock" in target_lower or "mhz" in target_lower:
+        return "clock_family"
+    if "conflict" in target_lower:
+        return "bank_conflict_family"
+    if "shmem" in target_lower or "shared" in target_lower or "limit" in target_lower:
+        return "resource_limit_family"
+    return "generic_family"
+
+
+def group_targets_by_family(targets: list[str]) -> list[tuple[str, list[str]]]:
+    grouped: dict[str, list[str]] = {}
+    for target in targets:
+        family = infer_target_family(target)
+        grouped.setdefault(family, []).append(target)
+    return list(grouped.items())
+
+
+def build_family_design_guidance(family: str, targets: list[str]) -> str:
+    constraints = FAMILY_DESIGN_CONSTRAINTS.get(
+        family,
+        {
+            "goal": "为这一组 target 设计可复用的共享 benchmark。",
+            "must": "尽量在一份 .cu 和一个可执行程序中通过 mode/参数覆盖多个 target。",
+            "avoid": "不要无必要地为每个 target 单独生成完全独立的 probe。",
+        },
+    )
+
+    lines = [
+        f"当前 family: {family}",
+        f"- Family 目标: {constraints['goal']}",
+        f"- Family 必须满足: {constraints['must']}",
+        f"- Family 禁止或避免: {constraints['avoid']}",
+        "",
+        "当前 family 内各 target 的额外约束如下：",
+    ]
+    for target in targets:
+        target_constraints = TARGET_DESIGN_CONSTRAINTS.get(target, DEFAULT_TARGET_DESIGN_CONSTRAINTS)
+        lines.append(f"[{target}]")
+        lines.append(f"- 目标: {target_constraints['goal']}")
+        lines.append(f"- 必须满足: {target_constraints['must']}")
+        lines.append(f"- 禁止或避免: {target_constraints['avoid']}")
+    lines.append("你应优先实现一个多 mode 共享 benchmark，再用不同 mode 或参数运行同一二进制，最后拆回各个 target 的结果。")
     return "\n".join(lines)

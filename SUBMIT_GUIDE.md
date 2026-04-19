@@ -167,34 +167,27 @@ Example response:
 
 ```json
 {
-  "ok": true,
-  "user_id": "23210240000",
-  "status": "running",
-  "require_gpu": true,
-  "gpu_id": 0,
-  "output_file": "xxxxxxxx",
-  "submit_count": 0,
-  "submit_limit": 2,
-  "remaining_submit_count": 2
+  "message": "Mission submitted. Mission id: 7f9ca49ee0d67d7d2ca3847bc9b6eb9e.",
+  "return_status": "OK"
 }
 ```
 
 Important:
 
-- save `output_file`
+- save `mission_id`
 
 ## Step 6: Query Submission Status
 
-Use the `output_file` returned by `submit-test` or `submit`:
+Use the `mission_id` returned by `submit-test` or `submit`:
 
 ```bash
-curl http://10.176.37.31:8080/submit_status/<output_file>
+curl http://10.176.37.31:8080/submit_status/<mission_id>
 ```
 
 Example:
 
 ```bash
-curl http://10.176.37.31:8080/submit_status/7f3d6d3b0d4f0b2f7a6d6d43b4b9fabc
+curl http://10.176.37.31:8080/submit_status/7f9ca49ee0d67d7d2ca3847bc9b6eb9e
 ```
 
 Possible status values:
@@ -204,6 +197,12 @@ Possible status values:
 - `failed`
 - `killed`
 
+Notes:
+
+- the status endpoint is the source of truth for progress
+- `mission_id` is not necessarily the same thing as the final output filename shown on `/outputs`
+- you should first query task status, then use the returned information to locate the real output
+
 ## Step 7: View Output Files
 
 Open in browser:
@@ -212,7 +211,7 @@ Open in browser:
 http://10.176.37.31:8080/outputs
 ```
 
-Then find your `output_file`.
+Then find the actual generated output file after the task has finished.
 
 You can also inspect these files in the remote workspace when available:
 
@@ -231,8 +230,8 @@ curl -X POST http://10.176.37.31:8080/submit \
 
 Then:
 
-1. save `output_file`
-2. query status with `/submit_status/<output_file>`
+1. save `mission_id`
+2. query status with `/submit_status/<mission_id>`
 3. download or inspect the output
 
 ## Recommended Full Workflow
@@ -267,7 +266,7 @@ curl -X POST http://10.176.37.31:8080/submit-test \
 ### Phase 4: Status Query
 
 ```bash
-curl http://10.176.37.31:8080/submit_status/<output_file>
+curl http://10.176.37.31:8080/submit_status/<mission_id>
 ```
 
 ### Phase 5: Formal Submit

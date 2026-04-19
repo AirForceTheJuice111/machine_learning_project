@@ -56,3 +56,5 @@ Thumbs.db
 # Optional profiling outputs
 *.ncu-rep
 *.qdrep
+
+SUBMIT_GUIDE.md

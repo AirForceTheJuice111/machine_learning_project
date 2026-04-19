@@ -1,8 +1,10 @@
 {
   "targets": [
-    "l1_latency_cycles",
-    "l2_latency_cycles",
-    "dram_latency_cycles",
-    "l2_cache_capacity_mb"
+    "launch__sm_count",
+    "dram__bytes_read.sum.per_second",
+    "dram__bytes_write.sum.per_second",
+    "device__attribute_max_gpu_frequency_khz",
+    "device__attribute_max_mem_frequency_khz",
+    "device__attribute_fb_bus_width"
   ]
 }

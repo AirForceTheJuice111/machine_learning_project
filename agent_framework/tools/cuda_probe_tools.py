@@ -36,6 +36,10 @@ class CompileAndRunCudaSourceTool:
                     "type": "string",
                     "description": "输出二进制路径，默认与源文件同名去掉 .cu 后缀。",
                 },
+                "skip_compile": {
+                    "type": "boolean",
+                    "description": "若为 true，则跳过编译并直接运行现有 binary_path；适合同一 benchmark 多 mode 复用。",
+                },
                 "nvcc_path": {
                     "type": "string",
                     "description": "nvcc 可执行文件路径，默认直接使用 nvcc。",
@@ -88,6 +92,7 @@ class CompileAndRunCudaSourceTool:
         generated_cuda_root = project_root / "generated_cuda"
         source_path = Path(arguments["source_path"]).expanduser()
         binary_path = Path(arguments.get("binary_path", source_path.with_suffix(""))).expanduser()
+        skip_compile = bool(arguments.get("skip_compile", False))
         nvcc_path = arguments.get("nvcc_path", "nvcc")
         compile_timeout = int(arguments.get("compile_timeout", self.default_compile_timeout))
         run_timeout = int(arguments.get("run_timeout", self.default_run_timeout))
@@ -127,15 +132,24 @@ class CompileAndRunCudaSourceTool:
         if not source_path.exists():
             return ToolResult(status="error", content=f"CUDA 源文件不存在: {source_path}")
 
-        compile_result = self._compile_source(
-            nvcc_path=nvcc_path,
-            source_path=source_path,
-            binary_path=binary_path,
-            extra_nvcc_flags=extra_nvcc_flags,
-            timeout=compile_timeout,
-        )
-        if isinstance(compile_result, ToolResult):
-            return compile_result
+        compile_executed = not skip_compile
+        compile_result = ""
+        if skip_compile:
+            if not binary_path.exists():
+                return ToolResult(
+                    status="error",
+                    content=f"请求跳过编译，但目标二进制不存在: {binary_path}",
+                )
+        else:
+            compile_result = self._compile_source(
+                nvcc_path=nvcc_path,
+                source_path=source_path,
+                binary_path=binary_path,
+                extra_nvcc_flags=extra_nvcc_flags,
+                timeout=compile_timeout,
+            )
+            if isinstance(compile_result, ToolResult):
+                return compile_result
 
         run_result = self._run_binary(
             binary_path=binary_path,
@@ -167,7 +181,9 @@ class CompileAndRunCudaSourceTool:
                 {
                     "source_path": str(source_path),
                     "binary_path": str(binary_path),
+                    "compile_executed": compile_executed,
                     "compile_stderr": compile_result,
+                    "program_args": program_args,
                     "run_stdout": run_stdout,
                     "run_stderr": run_stderr,
                     "profile_stdout": profile_stdout,
