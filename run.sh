@@ -20,9 +20,16 @@ if [ -n "${missing_packages}" ]; then
     || python3 -m pip install --no-input ${missing_packages}
 fi
 
-export PYTHONPATH="/workspace${PYTHONPATH:+:${PYTHONPATH}}"
+python3 - <<'PY'
+try:
+    import torch  # noqa: F401
+except ModuleNotFoundError as exc:
+    raise SystemExit("phase2 运行需要 PyTorch，但当前环境缺少 torch。") from exc
+PY
 
-python3 -m agent_framework.evaluate \
-  --target-spec /target/target_spec.json \
-  --output /workspace/output.json \
-  --skip-details-output | tee /workspace/results.log
+export PYTHONPATH="/workspace${PYTHONPATH:+:${PYTHONPATH}}"
+export PHASE2_MAX_RUNTIME_SECONDS="${PHASE2_MAX_RUNTIME_SECONDS:-1740}"
+
+python3 -m agent_framework.lora_optimize \
+  --project-root /workspace \
+  --time-budget-seconds "${PHASE2_MAX_RUNTIME_SECONDS}" | tee /workspace/results.log

@@ -12,6 +12,7 @@ pip-wheel-metadata/
 
 # Virtual environments
 .venv/
+.venv_phase2/
 venv/
 env/
 ENV/
@@ -30,6 +31,8 @@ ENV/
 *.pid
 *.out
 *.err
+results.json
+result.log.txt
 
 # Environment / secrets
 .env
@@ -51,6 +54,8 @@ Thumbs.db
 *.lib
 *.exe
 *.bin
+lora_workspace/
+generated_cuda/
 
 
 # Optional profiling outputs
