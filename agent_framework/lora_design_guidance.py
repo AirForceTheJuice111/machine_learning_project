@@ -76,7 +76,7 @@ Y = W X + A(B^T X)
 
 候选命名与评测协议：
 - 候选文件统一写入 `lora_workspace/candidates/`。
-- 命名建议为 `cand_v{版本号}_{简短策略名}.cu`，例如 `cand_v3_tile64.cu`。
+- 命名建议为 `cand_v{{版本号}}_{{简短策略名}}.cu`，例如 `cand_v3_tile64.cu`。
 - 每写出一个候选后，立即用 `evaluate_lora_candidate` 评测，不要批量堆积未评测候选。
 - 评测结果里会返回 `compile_ok`、`correctness_passed`、`mean_speedup`、`min_speedup`、`score`、`decision_hint`。
 - 只有当候选通过 correctness，且相对当前 best 在 score 或至少 speedup 上有清晰优势，才执行 `promote_lora_candidate`。

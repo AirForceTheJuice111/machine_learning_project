@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +163,56 @@ def load_best_report(project_root: Path) -> dict[str, Any] | None:
         return None
 
 
+def choose_best_full_report(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    full_reports = [
+        report
+        for report in reports
+        if report.get("compile_ok")
+        and report.get("correctness_passed")
+        and str(report.get("shape_preset", "")).lower() == "full"
+    ]
+    return choose_best_report(full_reports) if full_reports else None
+
+
+def materialize_best_from_report(project_root: Path, report: dict[str, Any]) -> dict[str, Any] | None:
+    source_value = str(report.get("source_path") or "").strip()
+    if not source_value:
+        return None
+    source_path = Path(source_value).resolve()
+    if not source_path.exists():
+        return None
+
+    optimized_path = project_root / "optimized_lora.cu"
+    best_dir = project_root / "lora_workspace" / "best"
+    best_dir.mkdir(parents=True, exist_ok=True)
+    best_source_path = best_dir / "optimized_lora_best.cu"
+    best_report_path = best_dir / "best_report.json"
+
+    shutil.copyfile(source_path, optimized_path)
+    shutil.copyfile(source_path, best_source_path)
+
+    materialized_report = dict(report)
+    original_report_path = materialized_report.get("report_path")
+    if original_report_path:
+        materialized_report["source_report_path"] = str(original_report_path)
+    materialized_report["report_path"] = str(best_report_path.resolve())
+    materialized_report["auto_promoted"] = True
+    best_report_path.write_text(json.dumps(materialized_report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return materialized_report
+
+
+def ensure_materialized_best_report(
+    *, project_root: Path, execution_state: dict[str, Any], best_report: dict[str, Any] | None
+) -> tuple[dict[str, Any] | None, bool]:
+    if best_report is not None:
+        return best_report, False
+    fallback_report = choose_best_full_report(execution_state.get("candidate_reports", []))
+    if fallback_report is None:
+        return None, False
+    materialized = materialize_best_from_report(project_root, fallback_report)
+    return materialized, materialized is not None
+
+
 def report_score(report: dict[str, Any]) -> float:
     value = report.get("score")
     if isinstance(value, (int, float)):
@@ -228,15 +279,17 @@ def synthesize_phase2_summary(
 def build_completion_feedback(*, project_root: Path, execution_state: dict[str, Any], best_report: dict[str, Any] | None) -> str:
     issues: list[str] = []
     optimized_path = project_root / "optimized_lora.cu"
+    fallback_full_report = choose_best_full_report(execution_state.get("candidate_reports", []))
 
     if not optimized_path.exists():
         issues.append("提交根目录下仍缺少 optimized_lora.cu")
     if execution_state["unique_candidates"] < 2:
         issues.append("当前还没有比较至少 2 个候选实现")
-    if execution_state["promotions"] < 1:
+    if execution_state["promotions"] < 1 and fallback_full_report is None:
         issues.append("当前还没有通过 promote_lora_candidate 固化 best 版本")
     if best_report is None:
-        issues.append("当前还没有 best_report.json，说明 best 尚未完成正式评测记录")
+        if fallback_full_report is None:
+            issues.append("当前还没有 best_report.json，说明 best 尚未完成正式评测记录")
     else:
         if not best_report.get("compile_ok"):
             issues.append("当前 best 最近一次评测未通过编译")
@@ -252,6 +305,14 @@ def build_completion_feedback(*, project_root: Path, execution_state: dict[str, 
             "best_shape_preset、correctness_passed、mean_speedup、min_speedup、used_hardware_probes、"
             "best_report_path、best_report_score。"
         )
+    if fallback_full_report is not None and best_report is None:
+        report_path = fallback_full_report.get("report_path", "")
+        source_path = fallback_full_report.get("source_path", "")
+        return (
+            "当前已经存在通过 full 验证的最佳候选，但还没有固化到 best。"
+            f"请立刻对 source_path={source_path}、report_path={report_path} 执行一次 promote_lora_candidate，"
+            "然后停止继续搜索，只输出最终总结 JSON。"
+        )
     joined = "；".join(issues)
     return (
         f"phase2 尚未满足结束条件：{joined}。"
@@ -265,12 +326,17 @@ def build_phase2_completion_checker(*, project_root: Path):
     def checker(memory: ConversationMemory, assistant_content: str) -> CompletionCheckResult:
         execution_state = analyze_phase2_execution(memory)
         best_report = load_best_report(project_root)
+        best_report, auto_promoted = ensure_materialized_best_report(
+            project_root=project_root,
+            execution_state=execution_state,
+            best_report=best_report,
+        )
         summary = extract_json(assistant_content)
 
         meets_engineering_requirements = (
             optimized_path.exists()
             and execution_state["unique_candidates"] >= 2
-            and execution_state["promotions"] >= 1
+            and (execution_state["promotions"] >= 1 or auto_promoted)
             and best_report is not None
             and bool(best_report.get("compile_ok"))
             and bool(best_report.get("correctness_passed"))
@@ -392,8 +458,37 @@ def main() -> None:
     summary_path = layout["logs_dir"] / "final_summary.json"
     execution_state = analyze_phase2_execution(engine.memory)
     best_report = load_best_report(project_root)
+    best_report, auto_promoted = ensure_materialized_best_report(
+        project_root=project_root,
+        execution_state=execution_state,
+        best_report=best_report,
+    )
 
     if is_engine_terminal_failure(final_answer):
+        recovered_full_best = (
+            best_report is not None
+            and bool(best_report.get("compile_ok"))
+            and bool(best_report.get("correctness_passed"))
+            and str(best_report.get("shape_preset", "")).lower() == "full"
+        )
+        if recovered_full_best:
+            recovered_summary = synthesize_phase2_summary(
+                project_root=project_root,
+                execution_state=execution_state,
+                best_report=best_report,
+            )
+            recovered_summary["raw_error"] = final_answer
+            recovered_summary["recovered_from_timeout"] = True
+            recovered_summary["auto_promoted"] = auto_promoted or bool(best_report.get("auto_promoted"))
+            summary_path.write_text(json.dumps(recovered_summary, indent=2, ensure_ascii=False), encoding="utf-8")
+            console.print(
+                Panel(
+                    "达到时间上限，但系统已基于通过 full 验证的最佳候选自动固化 best 并写出 summary。",
+                    title="Phase2 Recovered",
+                    border_style="yellow",
+                )
+            )
+            return
         failure_payload = {
             "error": final_answer,
             "optimized_lora_path": str((project_root / "optimized_lora.cu").resolve()),
