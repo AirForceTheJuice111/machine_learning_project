@@ -42,10 +42,18 @@ class ConversationMemory:
         self,
         content: str | None,
         tool_calls: list[dict[str, Any]] | None = None,
+        assistant_message: dict[str, Any] | None = None,
     ) -> None:
-        message: dict[str, Any] = {"role": "assistant", "content": content or ""}
-        if tool_calls:
-            message["tool_calls"] = tool_calls
+        if assistant_message is not None:
+            message = dict(assistant_message)
+            message.setdefault("role", "assistant")
+            message.setdefault("content", content or "")
+            if tool_calls and "tool_calls" not in message:
+                message["tool_calls"] = tool_calls
+        else:
+            message = {"role": "assistant", "content": content or ""}
+            if tool_calls:
+                message["tool_calls"] = tool_calls
         self.messages.append(message)
 
     def add_tool_result(self, tool_call_id: str, content: str) -> None:

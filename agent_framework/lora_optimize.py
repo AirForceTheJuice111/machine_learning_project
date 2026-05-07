@@ -646,6 +646,18 @@ def is_engine_terminal_failure(message: str) -> bool:
     return message.startswith(prefixes)
 
 
+def classify_engine_terminal_failure(message: str) -> str:
+    if not isinstance(message, str):
+        return "unknown"
+    if message.startswith("LLM 调用失败"):
+        return "llm_error"
+    if message.startswith("已达到时间上限"):
+        return "timeout"
+    if message.startswith("执行被中止"):
+        return "aborted"
+    return "unknown"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Phase2 LoRA Optimization Agent")
     parser.add_argument(
@@ -730,6 +742,7 @@ def main() -> None:
     )
 
     if is_engine_terminal_failure(final_answer):
+        failure_kind = classify_engine_terminal_failure(final_answer)
         recovered_full_best = (
             best_report is not None
             and bool(best_report.get("compile_ok"))
@@ -749,10 +762,19 @@ def main() -> None:
             if archive_info is not None:
                 recovered_summary.update(archive_info)
             summary_path.write_text(json.dumps(recovered_summary, indent=2, ensure_ascii=False), encoding="utf-8")
+            if failure_kind == "timeout":
+                recovered_title = "Phase2 Recovered"
+                recovered_message = "达到时间上限，但系统已基于通过 full 验证的最佳候选自动固化 best 并写出 summary。"
+            elif failure_kind == "llm_error":
+                recovered_title = "Phase2 LLM Recovered"
+                recovered_message = "LLM 调用失败，但系统已基于通过 full 验证的最佳候选自动固化 best 并写出 summary。"
+            else:
+                recovered_title = "Phase2 Recovered"
+                recovered_message = "主循环提前结束，但系统已基于通过 full 验证的最佳候选自动固化 best 并写出 summary。"
             console.print(
                 Panel(
-                    "达到时间上限，但系统已基于通过 full 验证的最佳候选自动固化 best 并写出 summary。",
-                    title="Phase2 Recovered",
+                    recovered_message,
+                    title=recovered_title,
                     border_style="yellow",
                 )
             )

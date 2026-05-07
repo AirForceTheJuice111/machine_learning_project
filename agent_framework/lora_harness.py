@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -18,7 +19,6 @@ DEFAULT_SMOKE_SHAPES = [3584]
 
 def starter_optimized_lora_source() -> str:
     return r"""#include <torch/extension.h>
-#include <ATen/cuda/CUDAGuard.h>
 #include <vector>
 
 #define CHECK_CUDA(x) TORCH_CHECK((x).is_cuda(), #x " must be a CUDA tensor")
@@ -66,7 +66,6 @@ torch::Tensor forward(torch::Tensor W,
                       torch::Tensor A,
                       torch::Tensor B) {
     validate_inputs(W, X, A, B);
-    at::cuda::OptionalCUDAGuard device_guard(device_of(W));
 
     auto Wc = W.contiguous();
     auto Xc = X.contiguous();
@@ -152,13 +151,23 @@ def build_module(cu_path: str, *, build_root: Path):
     module_name = f"optimized_lora_ext_{digest}"
     build_dir = build_root / digest
     build_dir.mkdir(parents=True, exist_ok=True)
+    extra_cuda_cflags = ["-O3"]
+    use_fast_math = os.getenv("LORA_HARNESS_USE_FAST_MATH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if use_fast_math:
+        extra_cuda_cflags.append("--use_fast_math")
+
     module = load(
         name=module_name,
         sources=[str(source_path)],
         verbose=False,
         with_cuda=True,
         extra_cflags=["-O3"],
-        extra_cuda_cflags=["-O3", "--use_fast_math"],
+        extra_cuda_cflags=extra_cuda_cflags,
         build_directory=str(build_dir),
     )
     return module, module_name

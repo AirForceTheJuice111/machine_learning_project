@@ -84,6 +84,7 @@ class AgentEngine:
             self.memory.add_assistant(
                 content=response.assistant_message.get("content"),
                 tool_calls=response.assistant_message.get("tool_calls"),
+                assistant_message=response.assistant_message,
             )
 
             if response.content.strip():

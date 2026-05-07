@@ -44,19 +44,46 @@ class OpenAILLMClient:
             timeout=self.request_timeout_seconds,
         )
 
+    @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            return default
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+    def _uses_thinking_mode(self) -> bool:
+        # Default to standard chat mode so model switching only requires
+        # updating env vars like API_KEY / BASE_URL / BASE_MODEL.
+        return self._env_flag("LLM_ENABLE_THINKING", False) or self._env_flag(
+            "DEEPSEEK_ENABLE_THINKING", False
+        )
+
+    def _build_request_kwargs(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        request_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+        }
+        if tools:
+            request_kwargs["tools"] = tools
+            request_kwargs["tool_choice"] = "auto"
+        if self._uses_thinking_mode():
+            request_kwargs["reasoning_effort"] = os.getenv("DEEPSEEK_REASONING_EFFORT", "high")
+            request_kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        return request_kwargs
+
     def complete(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> LLMResponse:
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                temperature=self.temperature,
-            )
+            response = self.client.chat.completions.create(**self._build_request_kwargs(messages=messages, tools=tools))
         except APITimeoutError as exc:
             raise RuntimeError(
                 "LLM 请求超时。请检查 BASE_URL / 网络连通性，或增大环境变量 "
@@ -93,6 +120,9 @@ class OpenAILLMClient:
             "role": "assistant",
             "content": message.content or "",
         }
+        reasoning_content = getattr(message, "reasoning_content", None)
+        if reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
         if assistant_tool_calls:
             assistant_message["tool_calls"] = assistant_tool_calls
 

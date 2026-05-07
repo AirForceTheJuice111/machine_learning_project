@@ -14,7 +14,10 @@ where:
   torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
 - The file must compile with torch.utils.cpp_extension.load.
 - Do NOT use any external headers except <torch/extension.h> and standard CUDA/C++ headers.
-- The kernel must produce exactly Y = WX + A(B^T X) with numerical error < 1e-4.
+- The kernel must produce exactly Y = WX + A(B^T X) with torch.allclose(rtol=1e-4, atol=1e-4).
+- Use float32 for all loads, accumulators, temporaries, and stores. Do NOT use half, bf16, WMMA, Tensor Cores, fast-math intrinsics, or approximate reductions.
+- Avoid fragile internal headers such as ATen/cuda/CUDAGuard.h. Do not rely on OptionalCUDAGuard or device_of.
+- Handle every boundary tile exactly and deterministically. Correctness is more important than peak speed for this first fused candidate.
 
 **Optimization strategy**:
 Fuse the three stages into a single kernel launch. For each output tile (tileSize = 64 or 128):
@@ -23,7 +26,8 @@ Fuse the three stages into a single kernel launch. For each output tile (tileSiz
    - For each rank k in 0..15, load column k of A and the corresponding row of (B^T X) (obtained via a small tile of B and X), compute the outer product and add to the same register accumulator.
 3. Write the final tile of Y to global memory.
 
-Use cooperative groups or standard threadblock synchronization. No intermediate global memory for BTX or A*BTX. The kernel must handle arbitrary d inside the given range, with a simple launch grid (e.g., dim3 grid(ceil(d/tileSize), ceil(d/tileSize)), block(tileSize, tileSize)).
+Use standard threadblock synchronization. No intermediate global memory for BTX or A*BTX. The kernel must handle arbitrary d inside the given range, with a simple launch grid (e.g., dim3 grid(ceil(d/tileSize), ceil(d/tileSize)), block(tileSize, tileSize)).
+Before the final code, sanity-check that the implementation is numerically exact enough for the allclose threshold and that every variable name matches the intended tensor layout.
 Provide the complete .cu file. Include proper PyTorch binding via PYBIND11_MODULE.
 """
 
@@ -34,6 +38,9 @@ Y = W @ X + A @ (B^T @ X)   with rank r=16, all tensors float32, d in [3584, 460
 - Function signature: torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
 - The .cu file must be self-contained, without extra .cuh/.h files.
 - Use proper PyTorch extension bindings (PYBIND11_MODULE).
+- Keep the implementation entirely float32. Do NOT use half, bf16, WMMA, Tensor Cores, or fast approximate math.
+- Avoid internal headers like ATen/cuda/CUDAGuard.h. Do not use OptionalCUDAGuard or device_of.
+- The result must pass torch.allclose(rtol=1e-4, atol=1e-4) against the float32 reference.
 
 **Kernel design**:
 - Use an output-tile parallelization: each thread block computes a TILE_X × TILE_Y (e.g., 64×64) block of Y.
@@ -44,8 +51,9 @@ Y = W @ X + A @ (B^T @ X)   with rank r=16, all tensors float32, d in [3584, 460
   2. For each k, load the required segment of A[:,k] and compute the partial product with the already-loaded X tile (using B’s corresponding row). Do this using shared memory for A_column_k and a small buffer for the B^T X intermediate.
   3. Accumulate all contributions into registers, then write the final tile to Y.
 
-- Choose tile sizes so that shared memory per block stays under 48 KB (Ampere). Use float4 reads/writes for coalesced access.
+- Choose tile sizes so that shared memory per block stays under 48 KB (Ampere). Use simple and correct memory accesses first; only use vectorized loads when alignment is guaranteed.
 - Add comments explaining tile choices and synchronization.
+- Double-check the boundary conditions and rank loop before returning the final code.
 Output the complete .cu code.
 """
 
@@ -59,6 +67,7 @@ torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::
 - Use nvcuda::wmma for 16x16x16 matrix multiply-add operations on Tensor Cores.
 - Perform WX and LoRA contribution using WMMA with FP16 inputs and FP32 accumulation.
 - Fuse the two stages in one kernel: compute a 16x16 tile of Y, then immediately add the LoRA contribution (A(B^T X)) to the same tile without writing to global memory.
+- Despite using WMMA, the final output must still pass torch.allclose(rtol=1e-4, atol=1e-4). Favor correctness over aggressive approximations.
 
 **Implementation plan**:
 1. Load 16x16 tiles of W and X (converted to half) into WMMA fragments, compute with mma_sync.
@@ -72,6 +81,7 @@ torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::
 - Use only <torch/extension.h>, standard CUDA headers, and <cuda_fp16.h>, <mma.h>.
 - Output must pass torch.allclose(rtol=1e-4, atol=1e-4) against the float32 reference.
 - Ensure proper threadblock and grid sizes for arbitrary d (pad or handle boundary tiles correctly).
+- Keep accumulators and the output tensor in float32, and make the boundary path explicit rather than relying on undefined behavior.
 
 Provide the full .cu file.
 """
@@ -79,7 +89,6 @@ Provide the full .cu file.
 
 def _common_prelude() -> str:
     return r"""#include <torch/extension.h>
-#include <ATen/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <vector>
@@ -140,7 +149,6 @@ torch::Tensor forward(torch::Tensor W,
                       torch::Tensor A,
                       torch::Tensor B) {
     validate_inputs(W, X, A, B);
-    at::cuda::OptionalCUDAGuard device_guard(device_of(W));
     auto Wc = W.contiguous();
     auto Xc = X.contiguous();
     auto Ac = A.contiguous();
@@ -168,7 +176,6 @@ torch::Tensor forward(torch::Tensor W,
                       torch::Tensor A,
                       torch::Tensor B) {
     validate_inputs(W, X, A, B);
-    at::cuda::OptionalCUDAGuard device_guard(device_of(W));
     auto Wc = W.contiguous();
     auto Xc = X.contiguous();
     auto Ac = A.contiguous();
@@ -223,7 +230,6 @@ torch::Tensor forward(torch::Tensor W,
                       torch::Tensor A,
                       torch::Tensor B) {
     validate_inputs(W, X, A, B);
-    at::cuda::OptionalCUDAGuard device_guard(device_of(W));
     auto Wc = W.contiguous();
     auto Xc = X.contiguous();
     auto Ac = A.contiguous();
