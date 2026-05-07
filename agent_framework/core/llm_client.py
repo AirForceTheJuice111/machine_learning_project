@@ -101,3 +101,10 @@ class OpenAILLMClient:
             tool_calls=tool_calls,
             assistant_message=assistant_message,
         )
+
+    def chat(self, prompt: str, *, system_prompt: str | None = None) -> str:
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        return self.complete(messages=messages, tools=[]).content

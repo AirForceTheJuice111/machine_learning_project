@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,9 @@ from agent_framework.lora_harness import starter_optimized_lora_source
 from agent_framework.tools.cuda_probe_tools import CompileAndRunCudaSourceTool
 from agent_framework.tools.lora_candidate_tools import (
     EvaluateLoraCandidateTool,
+    GenerateCudaCandidateFromPromptTool,
     PromoteLoraCandidateTool,
+    ReviseCandidateTool,
 )
 from agent_framework.tools.system_tools import ReadFileTool, WriteFileTool
 from agent_framework.tools.tool_registry import ToolRegistry
@@ -50,7 +53,12 @@ def extract_tool_json(rendered_tool_output: str) -> dict[str, Any]:
         return {}
 
 
-def build_phase2_registry(console: Console, *, project_root: Path) -> ToolRegistry:
+def build_phase2_registry(
+    console: Console,
+    *,
+    project_root: Path,
+    llm_client: OpenAILLMClient,
+) -> ToolRegistry:
     def approval_handler(prompt: str) -> bool:
         return True
 
@@ -63,9 +71,30 @@ def build_phase2_registry(console: Console, *, project_root: Path) -> ToolRegist
         )
     )
     registry.register(EvaluateLoraCandidateTool(default_project_root=project_root))
+    registry.register(
+        GenerateCudaCandidateFromPromptTool(
+            default_project_root=project_root,
+            llm_client=llm_client,
+        )
+    )
+    registry.register(
+        ReviseCandidateTool(
+            default_project_root=project_root,
+            llm_client=llm_client,
+        )
+    )
     registry.register(PromoteLoraCandidateTool(default_project_root=project_root))
     registry.register(CompileAndRunCudaSourceTool(default_project_root=project_root))
     return registry
+
+
+def clear_directory_contents(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for child in directory.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
 
 
 def ensure_phase2_layout(project_root: Path) -> dict[str, Path]:
@@ -82,6 +111,108 @@ def ensure_phase2_layout(project_root: Path) -> dict[str, Path]:
         "logs_dir": logs_dir,
         "best_dir": best_dir,
         "build_dir": build_dir,
+    }
+
+
+def allocate_best_archive_id(best_dir: Path) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    sequence = 1
+    while True:
+        archive_id = f"best_{timestamp}_{sequence:03d}"
+        archive_source_path = best_dir / f"{archive_id}_optimized_lora.cu"
+        archive_report_path = best_dir / f"{archive_id}_report.json"
+        if not archive_source_path.exists() and not archive_report_path.exists():
+            return archive_id
+        sequence += 1
+
+
+def update_best_manifest(*, best_dir: Path, archived_report: dict[str, Any]) -> str:
+    manifest_path = best_dir / "manifest.json"
+    manifest: dict[str, Any]
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            manifest = {}
+    else:
+        manifest = {}
+
+    archives = manifest.get("archives")
+    if not isinstance(archives, list):
+        archives = []
+
+    archive_id = str(archived_report.get("archive_id") or "").strip()
+    archives = [
+        entry
+        for entry in archives
+        if not isinstance(entry, dict) or str(entry.get("archive_id") or "").strip() != archive_id
+    ]
+
+    archive_entry = {
+        "archive_id": archive_id,
+        "archived_at": archived_report.get("archived_at"),
+        "optimized_lora_path": archived_report.get("archive_source_path"),
+        "report_path": archived_report.get("archive_report_path"),
+        "source_candidate_path": archived_report.get("source_path"),
+        "source_report_path": archived_report.get("source_report_path") or archived_report.get("report_path"),
+        "shape_preset": archived_report.get("shape_preset"),
+        "compile_ok": bool(archived_report.get("compile_ok")),
+        "correctness_passed": bool(archived_report.get("correctness_passed")),
+        "mean_speedup": float(archived_report.get("mean_speedup") or 0.0),
+        "min_speedup": float(archived_report.get("min_speedup") or 0.0),
+        "score": archived_report.get("score"),
+    }
+    archives.append(archive_entry)
+    archives.sort(key=lambda entry: str(entry.get("archived_at") or ""))
+
+    manifest_payload = {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "archive_count": len(archives),
+        "latest_archive_id": archive_id,
+        "archives": archives,
+    }
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(manifest_path.resolve())
+
+
+def archive_best_artifacts(
+    *,
+    project_root: Path,
+    best_report: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, str] | None]:
+    if best_report is None:
+        return best_report, None
+
+    best_dir = project_root / "lora_workspace" / "best"
+    best_dir.mkdir(parents=True, exist_ok=True)
+    best_source_path = best_dir / "optimized_lora_best.cu"
+    best_report_path = best_dir / "best_report.json"
+    optimized_path = project_root / "optimized_lora.cu"
+
+    source_snapshot = best_source_path if best_source_path.exists() else optimized_path
+    if not source_snapshot.exists() or not best_report_path.exists():
+        return best_report, None
+
+    archive_id = allocate_best_archive_id(best_dir)
+    archive_source_path = best_dir / f"{archive_id}_optimized_lora.cu"
+    archive_report_path = best_dir / f"{archive_id}_report.json"
+
+    archived_report = dict(best_report)
+    archived_report["archive_id"] = archive_id
+    archived_report["archive_source_path"] = str(archive_source_path.resolve())
+    archived_report["archive_report_path"] = str(archive_report_path.resolve())
+    archived_report["archived_at"] = datetime.now().isoformat(timespec="seconds")
+
+    shutil.copyfile(source_snapshot, archive_source_path)
+    best_report_path.write_text(json.dumps(archived_report, indent=2, ensure_ascii=False), encoding="utf-8")
+    archive_report_path.write_text(json.dumps(archived_report, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest_path = update_best_manifest(best_dir=best_dir, archived_report=archived_report)
+
+    return archived_report, {
+        "archive_id": archive_id,
+        "archive_source_path": str(archive_source_path.resolve()),
+        "archive_report_path": str(archive_report_path.resolve()),
+        "archive_manifest_path": manifest_path,
     }
 
 
@@ -111,6 +242,8 @@ def analyze_phase2_execution(memory: ConversationMemory) -> dict[str, Any]:
 
     candidate_reports: list[dict[str, Any]] = []
     promotions: list[dict[str, Any]] = []
+    generation_events: list[dict[str, Any]] = []
+    revision_events: list[dict[str, Any]] = []
     hardware_probe_runs = 0
 
     for message in memory.messages:
@@ -124,6 +257,17 @@ def analyze_phase2_execution(memory: ConversationMemory) -> dict[str, Any]:
                 payload = extract_tool_json(tool_result)
                 if payload:
                     candidate_reports.append(payload)
+            elif (
+                tool_name == "generate_cuda_candidate_from_prompt"
+                and "[generate_cuda_candidate_from_prompt] status=ok" in tool_result
+            ):
+                payload = extract_tool_json(tool_result)
+                if payload:
+                    generation_events.append(payload)
+            elif tool_name == "revise_candidate" and "[revise_candidate] status=ok" in tool_result:
+                payload = extract_tool_json(tool_result)
+                if payload:
+                    revision_events.append(payload)
             elif tool_name == "promote_lora_candidate" and "[promote_lora_candidate] status=ok" in tool_result:
                 payload = extract_tool_json(tool_result)
                 if payload:
@@ -139,6 +283,11 @@ def analyze_phase2_execution(memory: ConversationMemory) -> dict[str, Any]:
         for report in candidate_reports
     }
     best_seen_report = choose_best_report(candidate_reports)
+    generation_prompt_ids = [
+        str(event.get("prompt_id") or "").strip()
+        for event in generation_events
+        if str(event.get("prompt_id") or "").strip()
+    ]
 
     return {
         "candidate_reports": candidate_reports,
@@ -150,6 +299,9 @@ def analyze_phase2_execution(memory: ConversationMemory) -> dict[str, Any]:
         "promotions": len(promotions),
         "hardware_probe_runs": hardware_probe_runs,
         "best_seen_report": best_seen_report,
+        "generation_events": generation_events,
+        "generation_prompt_ids": generation_prompt_ids,
+        "revision_events": revision_events,
     }
 
 
@@ -238,6 +390,82 @@ def choose_best_report(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
     return max(pool, key=report_score)
 
 
+def load_generation_prompt_ids(project_root: Path) -> list[str]:
+    manifest_path = project_root / "lora_workspace" / "candidates" / "seed_manifest.json"
+    if not manifest_path.exists():
+        return []
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+
+    prompt_entries = payload.get("generation_prompts")
+    if not isinstance(prompt_entries, list):
+        return []
+    return [
+        str(entry.get("id") or "").strip()
+        for entry in prompt_entries
+        if isinstance(entry, dict) and str(entry.get("id") or "").strip()
+    ]
+
+
+def choose_next_generation_prompt_id(*, available_prompt_ids: list[str], used_prompt_ids: list[str]) -> str | None:
+    used = {prompt_id for prompt_id in used_prompt_ids if prompt_id}
+    for prompt_id in available_prompt_ids:
+        if prompt_id not in used:
+            return prompt_id
+    return None
+
+
+def count_recent_stalled_rounds(reports: list[dict[str, Any]], *, improvement_threshold: float = 0.02) -> int:
+    eligible_reports = [report for report in reports if report.get("compile_ok") and report.get("correctness_passed")]
+    if len(eligible_reports) < 2:
+        return 0
+
+    best_speedup = float(eligible_reports[0].get("mean_speedup") or 0.0)
+    stalled_rounds = 0
+    for report in eligible_reports[1:]:
+        current_speedup = float(report.get("mean_speedup") or 0.0)
+        required_speedup = best_speedup * (1.0 + improvement_threshold)
+        if current_speedup > required_speedup:
+            best_speedup = current_speedup
+            stalled_rounds = 0
+            continue
+        best_speedup = max(best_speedup, current_speedup)
+        stalled_rounds += 1
+    return stalled_rounds
+
+
+def analyze_search_readiness(*, project_root: Path, execution_state: dict[str, Any], best_report: dict[str, Any] | None) -> dict[str, Any]:
+    available_prompt_ids = load_generation_prompt_ids(project_root)
+    used_prompt_ids = execution_state.get("generation_prompt_ids", [])
+    attempted_prompt_ids = sorted({prompt_id for prompt_id in used_prompt_ids if prompt_id})
+    all_generation_prompts_tried = bool(available_prompt_ids) and all(
+        prompt_id in attempted_prompt_ids for prompt_id in available_prompt_ids
+    )
+    best_speedup = float(
+        (best_report or execution_state.get("best_seen_report") or {}).get("mean_speedup") or 0.0
+    )
+    stalled_rounds = count_recent_stalled_rounds(execution_state.get("candidate_reports", []))
+    search_stop_ready = (
+        best_speedup >= 1.2
+        or (all_generation_prompts_tried and best_speedup < 1.2)
+        or stalled_rounds >= 3
+    )
+    return {
+        "available_prompt_ids": available_prompt_ids,
+        "attempted_prompt_ids": attempted_prompt_ids,
+        "all_generation_prompts_tried": all_generation_prompts_tried,
+        "next_prompt_id": choose_next_generation_prompt_id(
+            available_prompt_ids=available_prompt_ids,
+            used_prompt_ids=attempted_prompt_ids,
+        ),
+        "stalled_rounds": stalled_rounds,
+        "best_speedup": best_speedup,
+        "search_stop_ready": search_stop_ready,
+    }
+
+
 def synthesize_phase2_summary(
     *,
     project_root: Path,
@@ -280,6 +508,11 @@ def build_completion_feedback(*, project_root: Path, execution_state: dict[str, 
     issues: list[str] = []
     optimized_path = project_root / "optimized_lora.cu"
     fallback_full_report = choose_best_full_report(execution_state.get("candidate_reports", []))
+    search_state = analyze_search_readiness(
+        project_root=project_root,
+        execution_state=execution_state,
+        best_report=best_report,
+    )
 
     if not optimized_path.exists():
         issues.append("提交根目录下仍缺少 optimized_lora.cu")
@@ -297,6 +530,20 @@ def build_completion_feedback(*, project_root: Path, execution_state: dict[str, 
             issues.append("当前 best 最近一次评测未通过 correctness")
         if str(best_report.get("shape_preset", "")).lower() != "full":
             issues.append("当前 best 还没有完成 full 预设验证")
+    if not search_state["search_stop_ready"]:
+        if search_state["best_speedup"] < 1.2 and not search_state["all_generation_prompts_tried"]:
+            remaining_prompts = [
+                prompt_id
+                for prompt_id in search_state["available_prompt_ids"]
+                if prompt_id not in search_state["attempted_prompt_ids"]
+            ]
+            if remaining_prompts:
+                issues.append(
+                    "当前 best 的 mean_speedup 仍低于 1.2，且尚未尝试完 generation_prompts："
+                    + ", ".join(remaining_prompts)
+                )
+        if search_state["stalled_rounds"] < 3:
+            issues.append(f"连续无显著提升轮数仍不足 3 轮（当前为 {search_state['stalled_rounds']} 轮）")
 
     if not issues:
         return (
@@ -313,10 +560,17 @@ def build_completion_feedback(*, project_root: Path, execution_state: dict[str, 
             f"请立刻对 source_path={source_path}、report_path={report_path} 执行一次 promote_lora_candidate，"
             "然后停止继续搜索，只输出最终总结 JSON。"
         )
+    if search_state["next_prompt_id"] is not None and search_state["best_speedup"] < 1.2:
+        next_step = (
+            f"建议下一步优先读取 seed_manifest.json 中 id={search_state['next_prompt_id']} 的 generation prompt，"
+            "调用 generate_cuda_candidate_from_prompt 生成融合 kernel 候选；若编译失败或 correctness 失败，再调用 revise_candidate。"
+        )
+    else:
+        next_step = "建议继续根据最新失败日志或性能瓶颈调用 revise_candidate，并在必要时补齐 full 验证。"
     joined = "；".join(issues)
     return (
         f"phase2 尚未满足结束条件：{joined}。"
-        "请继续按照候选搜索策略推进：评估基线、比较候选、必要时晋升 best，并在收尾前完成 full 验证。"
+        f"{next_step}"
     )
 
 
@@ -332,6 +586,11 @@ def build_phase2_completion_checker(*, project_root: Path):
             best_report=best_report,
         )
         summary = extract_json(assistant_content)
+        search_state = analyze_search_readiness(
+            project_root=project_root,
+            execution_state=execution_state,
+            best_report=best_report,
+        )
 
         meets_engineering_requirements = (
             optimized_path.exists()
@@ -341,6 +600,7 @@ def build_phase2_completion_checker(*, project_root: Path):
             and bool(best_report.get("compile_ok"))
             and bool(best_report.get("correctness_passed"))
             and str(best_report.get("shape_preset", "")).lower() == "full"
+            and search_state["search_stop_ready"]
         )
 
         if meets_engineering_requirements and not _last_assistant_has_tool_calls(memory):
@@ -405,6 +665,7 @@ def main() -> None:
     console = Console()
     project_root = Path(args.project_root).resolve()
     layout = ensure_phase2_layout(project_root)
+    clear_directory_contents(layout["candidates_dir"])
     optimized_path, seed_info = ensure_starter_candidate(project_root, candidates_dir=layout["candidates_dir"])
 
     api_key = os.getenv("API_KEY")
@@ -426,7 +687,11 @@ def main() -> None:
     )
     engine = AgentEngine(
         llm_client=llm_client,
-        tool_registry=build_phase2_registry(console, project_root=project_root),
+        tool_registry=build_phase2_registry(
+            console,
+            project_root=project_root,
+            llm_client=llm_client,
+        ),
         memory=memory,
         console=console,
         max_runtime_seconds=args.time_budget_seconds,
@@ -472,6 +737,7 @@ def main() -> None:
             and str(best_report.get("shape_preset", "")).lower() == "full"
         )
         if recovered_full_best:
+            best_report, archive_info = archive_best_artifacts(project_root=project_root, best_report=best_report)
             recovered_summary = synthesize_phase2_summary(
                 project_root=project_root,
                 execution_state=execution_state,
@@ -480,6 +746,8 @@ def main() -> None:
             recovered_summary["raw_error"] = final_answer
             recovered_summary["recovered_from_timeout"] = True
             recovered_summary["auto_promoted"] = auto_promoted or bool(best_report.get("auto_promoted"))
+            if archive_info is not None:
+                recovered_summary.update(archive_info)
             summary_path.write_text(json.dumps(recovered_summary, indent=2, ensure_ascii=False), encoding="utf-8")
             console.print(
                 Panel(
@@ -499,6 +767,7 @@ def main() -> None:
         return
 
     summary = extract_json(final_answer)
+    best_report, archive_info = archive_best_artifacts(project_root=project_root, best_report=best_report)
     if summary:
         synthesized = synthesize_phase2_summary(
             project_root=project_root,
@@ -506,6 +775,8 @@ def main() -> None:
             best_report=best_report,
         )
         merged_summary = {**synthesized, **summary}
+        if archive_info is not None:
+            merged_summary.update(archive_info)
         summary_path.write_text(json.dumps(merged_summary, indent=2, ensure_ascii=False), encoding="utf-8")
     else:
         fallback_summary = synthesize_phase2_summary(
@@ -514,6 +785,8 @@ def main() -> None:
             best_report=best_report,
         )
         fallback_summary["raw_output"] = final_answer
+        if archive_info is not None:
+            fallback_summary.update(archive_info)
         summary_path.write_text(json.dumps(fallback_summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     console.print(Panel(f"phase2 已结束，当前 best 文件: {optimized_path}", title="Phase2 Completed", border_style="green"))

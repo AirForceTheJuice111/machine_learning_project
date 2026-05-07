@@ -30,19 +30,22 @@ Phase2 在 phase1 框架基础上复用了：
   - 候选评测与 best 晋升工具
 - `agent_framework/lora_design_guidance.py`
   - phase2 搜索策略与停止条件 prompt
+- `agent_framework/lora_candidate_templates.py`
+  - seed candidate 模板与模板清单生成
 
 ## 3. Candidate Search Workflow
 
 Phase2 采用“候选生成 -> 评测 -> 比较 -> 晋升”的真实 Agent 工作流：
 
 1. 初始化一个可编译的 `optimized_lora.cu` baseline
-2. 将新候选写入 `lora_workspace/candidates/`
-3. 用 `evaluate_lora_candidate` 做 correctness + benchmark
-4. 比较 `compile_ok`、`correctness_passed`、`mean_speedup`、`min_speedup`、`score`
-5. 对更优候选执行 `promote_lora_candidate`
-6. 将 best 持续保存在提交根目录 `optimized_lora.cu`
+2. 启动时先清空 `lora_workspace/candidates/`，然后重新写入 baseline seed 与模板 seed
+3. 将新候选写入 `lora_workspace/candidates/`
+4. 用 `evaluate_lora_candidate` 做 correctness + benchmark
+5. 比较 `compile_ok`、`correctness_passed`、`mean_speedup`、`min_speedup`、`score`
+6. 对更优候选执行 `promote_lora_candidate`
+7. 将 best 持续保存在提交根目录 `optimized_lora.cu`
 
-这样避免了“只提交静态内核”或“事先写好最终答案”的做法，体现了真正的智能体式优化流程。
+这样每一轮运行都从干净的候选目录开始，避免把上次搜索遗留的候选文件混入本轮实验。
 
 ## 4. Key Engineering Strategies
 
@@ -67,13 +70,13 @@ Phase2 采用“候选生成 -> 评测 -> 比较 -> 晋升”的真实 Agent 工
 - 尝试 tile / shared memory / register blocking
 - 针对 `r=16` 做结构化优化
 
-第三轮增强中，系统还加入了预置模板种子：
+当前代码已经内置三份 seed 模板：
 
 - `seed_aten_mm.cu`
 - `seed_addmm_rank16.cu`
 - `seed_lowrank_epilogue.cu`
 
-这样 Agent 不必总是从零生成候选，而可以从更贴近 LoRA 结构的模板出发做小步修改。
+并通过 `seed_manifest.json` 暴露给 Agent 读取。
 
 ### 4.3 Multi-Stage Evaluation
 
@@ -99,6 +102,41 @@ phase2 completion checker 采用工程状态判定，而不是只信模型口头
 - 当前 best 完成 full 验证
 
 若模型在收尾阶段输出不完整，系统会基于 `best_report.json` 自动合成最终 summary，减少无意义循环。
+
+### 4.5 Best Persistence And Archiving
+
+当前代码中的 best 管理机制已经从“只保留当前 best”扩展为“当前 best + 历史归档”两层结构：
+
+- 当前活跃 best：
+  - 根目录 `optimized_lora.cu`
+  - `lora_workspace/best/optimized_lora_best.cu`
+  - `lora_workspace/best/best_report.json`
+- 每次 phase2 成功收尾后会自动归档：
+  - `best_YYYYMMDD_HHMMSS_NNN_optimized_lora.cu`
+  - `best_YYYYMMDD_HHMMSS_NNN_report.json`
+
+此外，系统还支持集中索引：
+
+- `lora_workspace/best/manifest.json`
+
+`manifest.json` 会记录：
+
+- `archive_id`
+- `archived_at`
+- 归档 `.cu` 路径
+- 归档 report 路径
+- 源候选路径
+- `shape_preset`
+- `compile_ok`
+- `correctness_passed`
+- `mean_speedup`
+- `min_speedup`
+- `score`
+
+注意：
+
+- 如果新代码下尚未再次完整跑完一次归档流程，`manifest.json` 可能暂时还不存在
+- 但当前代码已经具备自动生成和更新它的能力
 
 ## 5. Model Interface
 
@@ -170,12 +208,24 @@ Windows 本地 phase2 在 PyTorch 扩展编译中容易遇到：
 - 本地 harness
 - 候选评测工具
 - best 晋升工具
+- best 历史归档与 `manifest.json` 索引能力
 - 候选搜索 prompt
 - 停止条件与收尾逻辑
 - `run.sh` 提交入口切换
+
+当前 best report 显示：
+
+- `shape_preset = full`
+- `compile_ok = true`
+- `correctness_passed = true`
+- `mean_speedup = 1.0220705710460947`
+- `min_speedup = 1.0198499675094959`
+
+这说明当前工程已经具备一套完整、可运行、可归档的 phase2 骨架，但当前 best 仍主要是基于 ATen 调用方式优化得到的版本，性能提升幅度还不大，后续重点仍是继续向更强的自定义 CUDA kernel 演进。
 
 当前下一阶段的重点是：
 
 - 在 Linux 环境中继续真实测试
 - 改善候选实现质量
 - 推进从 ATen baseline 向更高性能自定义 CUDA kernel 演进
+

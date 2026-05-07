@@ -3,6 +3,79 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+FUSED_V1_PROMPT = """You are a CUDA optimization expert. Your task is to write a single-file CUDA kernel that implements the LoRA forward pass:
+Y = W @ X + A @ (B^T @ X)
+where:
+- W (d x d), X (d x d), A (d x 16), B (d x 16), Y (d x d), all float32.
+- d is a multiple of 16, within [3584, 4608].
+
+**Core constraints**:
+- Output ONE self-contained .cu file with the interface:
+  torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
+- The file must compile with torch.utils.cpp_extension.load.
+- Do NOT use any external headers except <torch/extension.h> and standard CUDA/C++ headers.
+- The kernel must produce exactly Y = WX + A(B^T X) with numerical error < 1e-4.
+
+**Optimization strategy**:
+Fuse the three stages into a single kernel launch. For each output tile (tileSize = 64 or 128):
+1. Load a tile of W and a tile of X into shared memory, compute the WX contribution into registers.
+2. Immediately compute the LoRA contribution for that same tile:
+   - For each rank k in 0..15, load column k of A and the corresponding row of (B^T X) (obtained via a small tile of B and X), compute the outer product and add to the same register accumulator.
+3. Write the final tile of Y to global memory.
+
+Use cooperative groups or standard threadblock synchronization. No intermediate global memory for BTX or A*BTX. The kernel must handle arbitrary d inside the given range, with a simple launch grid (e.g., dim3 grid(ceil(d/tileSize), ceil(d/tileSize)), block(tileSize, tileSize)).
+Provide the complete .cu file. Include proper PyTorch binding via PYBIND11_MODULE.
+"""
+
+LOWRANK_OUTER_PROMPT = """You are a CUDA performance engineer. Generate a single-file CUDA extension for the LoRA forward pass:
+Y = W @ X + A @ (B^T @ X)   with rank r=16, all tensors float32, d in [3584, 4608].
+
+**Requirements**:
+- Function signature: torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
+- The .cu file must be self-contained, without extra .cuh/.h files.
+- Use proper PyTorch extension bindings (PYBIND11_MODULE).
+
+**Kernel design**:
+- Use an output-tile parallelization: each thread block computes a TILE_X × TILE_Y (e.g., 64×64) block of Y.
+- Decompose A(B^T X) into sum of 16 outer products:
+    for k in 0..15:  Y += A[:,k] * (B[:,k]^T @ X)
+- In the kernel:
+  1. Load the necessary tile of W and tile of X into shared memory, compute WX contribution into registers.
+  2. For each k, load the required segment of A[:,k] and compute the partial product with the already-loaded X tile (using B’s corresponding row). Do this using shared memory for A_column_k and a small buffer for the B^T X intermediate.
+  3. Accumulate all contributions into registers, then write the final tile to Y.
+
+- Choose tile sizes so that shared memory per block stays under 48 KB (Ampere). Use float4 reads/writes for coalesced access.
+- Add comments explaining tile choices and synchronization.
+Output the complete .cu code.
+"""
+
+WMMA_TENSORCORE_PROMPT = """You are a CUDA Tensor Core specialist. Write a self-contained .cu file that implements the LoRA forward pass on Ampere (SM 8.0, RTX 3090):
+Y = W @ X + A @ (B^T @ X),  d in [3584,4608], r=16, all inputs/outputs float32.
+
+**Interface**:
+torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
+
+**Optimization targets**:
+- Use nvcuda::wmma for 16x16x16 matrix multiply-add operations on Tensor Cores.
+- Perform WX and LoRA contribution using WMMA with FP16 inputs and FP32 accumulation.
+- Fuse the two stages in one kernel: compute a 16x16 tile of Y, then immediately add the LoRA contribution (A(B^T X)) to the same tile without writing to global memory.
+
+**Implementation plan**:
+1. Load 16x16 tiles of W and X (converted to half) into WMMA fragments, compute with mma_sync.
+2. For the LoRA part, for each rank k (0..15):
+   - Load the 16-element column of A and the corresponding row of (B^T X) (computed on-the-fly from a 16x16 tile of B and X using another WMMA call or manual half-precision multiply-add).
+   - Accumulate the outer product using the same WMMA fragment.
+3. Store the final FP32 tile to Y.
+
+**Constraints**:
+- Must compile with torch.utils.cpp_extension.load.
+- Use only <torch/extension.h>, standard CUDA headers, and <cuda_fp16.h>, <mma.h>.
+- Output must pass torch.allclose(rtol=1e-4, atol=1e-4) against the float32 reference.
+- Ensure proper threadblock and grid sizes for arbitrary d (pad or handle boundary tiles correctly).
+
+Provide the full .cu file.
+"""
+
 
 def _common_prelude() -> str:
     return r"""#include <torch/extension.h>
@@ -188,6 +261,50 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     ]
 
 
+def build_generation_prompt_catalog() -> list[dict[str, str]]:
+    return [
+        {
+            "id": "fused_v1",
+            "description": "Fused LoRA single kernel, tile size 64 or 128",
+            "prompt": FUSED_V1_PROMPT,
+        },
+        {
+            "id": "lowrank_outer",
+            "description": "Tiled low-rank outer product fused kernel",
+            "prompt": LOWRANK_OUTER_PROMPT,
+        },
+        {
+            "id": "wmma_tensorcore",
+            "description": "Tensor Core WMMA fused kernel (FP16/FP32)",
+            "prompt": WMMA_TENSORCORE_PROMPT,
+        },
+    ]
+
+
+def get_generation_prompts(manifest_path: str | Path) -> list[dict[str, str]]:
+    resolved_path = Path(manifest_path).expanduser().resolve()
+    payload = json.loads(resolved_path.read_text(encoding="utf-8"))
+    prompts = payload.get("generation_prompts", [])
+    if not isinstance(prompts, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in prompts:
+        if not isinstance(item, dict):
+            continue
+        prompt_id = str(item.get("id") or "").strip()
+        description = str(item.get("description") or "").strip()
+        prompt = str(item.get("prompt") or "").strip()
+        if prompt_id and prompt:
+            normalized.append(
+                {
+                    "id": prompt_id,
+                    "description": description,
+                    "prompt": prompt,
+                }
+            )
+    return normalized
+
+
 def write_seed_candidate_templates(candidates_dir: Path) -> dict[str, str]:
     candidates_dir.mkdir(parents=True, exist_ok=True)
     manifest: list[dict[str, str]] = []
@@ -205,8 +322,13 @@ def write_seed_candidate_templates(candidates_dir: Path) -> dict[str, str]:
         )
 
     manifest_path = candidates_dir / "seed_manifest.json"
-    manifest_path.write_text(json.dumps({"templates": manifest}, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest_payload = {
+        "templates": manifest,
+        "generation_prompts": build_generation_prompt_catalog(),
+    }
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return {
         "manifest_path": str(manifest_path.resolve()),
         "template_count": str(len(manifest)),
+        "generation_prompt_count": str(len(manifest_payload["generation_prompts"])),
     }
