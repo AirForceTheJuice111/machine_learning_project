@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from agent_framework.lora_candidate_templates import resolve_generation_prompt
 from agent_framework.tools.tool_registry import ToolResult
 
 if TYPE_CHECKING:
@@ -56,6 +57,16 @@ def _extract_code_from_llm_response(response_text: str) -> str:
 def _validate_generated_cuda_source(source_text: str) -> None:
     if "torch::Tensor forward" not in source_text:
         raise RuntimeError("生成的 CUDA 代码缺少 `torch::Tensor forward` 接口。")
+    if "PYBIND11_MODULE" not in source_text:
+        raise RuntimeError("生成的 CUDA 代码缺少 `PYBIND11_MODULE` 绑定导出。")
+    quoted_includes = re.findall(r'#include\s*"([^"]+)"', source_text)
+    if quoted_includes:
+        raise RuntimeError(
+            "生成的 CUDA 代码包含额外本地头文件依赖，不满足单文件提交要求: "
+            + ", ".join(sorted(quoted_includes))
+        )
+    if re.search(r"load_inline\s*\(", source_text):
+        raise RuntimeError("生成的 CUDA 代码不应再嵌套动态构建其他源码。")
 
 
 def _write_candidate_source(*, workspace_root: Path, candidate_name: str, source_text: str) -> str:
@@ -66,6 +77,7 @@ def _write_candidate_source(*, workspace_root: Path, candidate_name: str, source
 
 
 def generate_cuda_candidate_from_prompt(
+    *,
     prompt: str,
     candidate_name: str,
     llm_client: "OpenAILLMClient",
@@ -90,18 +102,25 @@ def generate_cuda_candidate_from_prompt(
 
 def _build_revision_prompt(source_text: str, error_or_bottleneck: str) -> str:
     issue_summary = error_or_bottleneck.strip() or "Unknown issue"
-    return f"""Here is a CUDA extension candidate for the LoRA forward pass.
+    return f"""You are revising a single-file PyTorch CUDA extension candidate for the LoRA forward pass.
 
 It has the following issue:
 {issue_summary}
 
-Please fix or improve it and return the complete corrected single-file .cu code only.
+Please return a revised complete .cu file that makes one focused improvement:
+- fix the compile/runtime/correctness error, or
+- preserve or strengthen kernel fusion while improving correctness/performance.
 
 Requirements:
 - Keep the interface exactly as:
   torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
 - Keep the file self-contained and compatible with torch.utils.cpp_extension.load
 - Preserve PyTorch binding via PYBIND11_MODULE
+- Keep math in float32
+- Prefer small, realistic edits over rewriting the whole file from scratch
+- Unless the current design is fundamentally broken, do not fall back to a pure at::mm / at::addmm composition
+- Favor shared-memory tiling, register tiling, coalesced memory access, and lower HBM traffic
+- If the candidate is already fused, try to keep the fused structure and repair it instead of collapsing back to multi-kernel ATen composition
 - Do not return explanations outside the code block
 
 Current CUDA code:
@@ -320,7 +339,7 @@ class GenerateCudaCandidateFromPromptTool:
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "用于生成 CUDA 候选的完整提示词文本。",
+                    "description": "可选，直接提供用于生成 CUDA 候选的完整提示词文本。",
                 },
                 "candidate_name": {
                     "type": "string",
@@ -328,23 +347,37 @@ class GenerateCudaCandidateFromPromptTool:
                 },
                 "prompt_id": {
                     "type": "string",
-                    "description": "可选，记录本次使用的 generation prompt ID。",
+                    "description": "可选，generation prompt 的内置 ID。给出后会自动解析提示词。",
                 },
                 "prompt_description": {
                     "type": "string",
                     "description": "可选，对本次 generation prompt 的简短说明。",
                 },
             },
-            "required": ["prompt", "candidate_name"],
+            "required": ["candidate_name"],
             "additionalProperties": False,
         }
 
     def run(self, arguments: dict[str, Any]) -> ToolResult:
-        prompt = str(arguments["prompt"])
         candidate_name = str(arguments["candidate_name"])
         prompt_id = str(arguments.get("prompt_id") or "").strip()
+        prompt = str(arguments.get("prompt") or "").strip()
         prompt_description = str(arguments.get("prompt_description") or "").strip()
         workspace_root = self.default_project_root / "lora_workspace"
+
+        if prompt_id:
+            try:
+                prompt_spec = resolve_generation_prompt(prompt_id)
+            except KeyError as exc:
+                return ToolResult(status="rejected", content=str(exc))
+            prompt = prompt_spec["prompt"]
+            if not prompt_description:
+                prompt_description = prompt_spec.get("description", "")
+        if not prompt:
+            return ToolResult(
+                status="rejected",
+                content="必须提供 `prompt` 或可解析的 `prompt_id`。",
+            )
 
         try:
             candidate_path = generate_cuda_candidate_from_prompt(

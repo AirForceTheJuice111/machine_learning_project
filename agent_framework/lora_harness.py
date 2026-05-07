@@ -324,17 +324,33 @@ def evaluate_candidate(
 
 
 def compute_report_score(report: dict[str, Any]) -> float:
+    # 1. 硬门槛：编译失败，分数极低
     if not bool(report.get("compile_ok")):
         return -1_000_000_000.0
+
+    # 2. 正确性失败，分数很低，但高于编译失败（表示代码能跑只是结果错）
     if not bool(report.get("correctness_passed")):
         return -100_000_000.0
 
-    shape_bonus = 1_000_000.0 if str(report.get("shape_preset", "")).lower() == "full" else 0.0
+    # 3. 提取性能指标
     mean_speedup = float(report.get("mean_speedup") or 0.0)
-    min_speedup = float(report.get("min_speedup") or 0.0)
+    min_speedup  = float(report.get("min_speedup") or 0.0)
     mean_student_ms = float(report.get("mean_student_ms") or 1e9)
-    return shape_bonus + mean_speedup * 10_000.0 + min_speedup * 1_000.0 - mean_student_ms
 
+    # 4. 核心分数：以加速比为主，幅度放大到百万级别以体现差异
+    #    mean_speedup 每提升 0.01，分数增加 10,000
+    #    min_speedup 每提升 0.01，分数增加  2,000（惩罚不稳定）
+    speedup_score = mean_speedup * 1_000_000.0 + min_speedup * 200_000.0
+
+    # 5. 微调项：同等加速比下，绝对时间更短的更好（归一化后影响很小）
+    #    将 mean_student_ms 转换成一个正项：我们喜欢时间短，所以用倒数
+    #    为防止除零，加一个很小的 epsilon
+    time_bonus = 1_000.0 / (mean_student_ms + 1e-6)
+
+    # 6. full preset 仅加一个很小的固定分（打破平局用）
+    shape_bonus = 500.0 if str(report.get("shape_preset", "")).lower() == "full" else 0.0
+
+    return speedup_score + time_bonus + shape_bonus
 
 def build_score_breakdown(report: dict[str, Any]) -> dict[str, Any]:
     return {

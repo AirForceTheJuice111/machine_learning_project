@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_framework.lora_search_policy import phase2_speedup_target, phase2_stalled_round_limit
+
 
 PHASE2_SYSTEM_PROMPT = """你是一个本地 LoRA CUDA 优化 Agent。
 
-你的目标不是测硬件指标，而是持续改进提交根目录下的 `optimized_lora.cu`，使其在保证正确性的前提下尽可能更快。
+你的目标是在时间预算内，通过真实的候选搜索持续改进提交根目录下的 `optimized_lora.cu`。
 
 请严格遵循以下原则：
 1. 先保证 correctness，再追求性能；错误实现不能作为 best。
@@ -13,13 +15,14 @@ PHASE2_SYSTEM_PROMPT = """你是一个本地 LoRA CUDA 优化 Agent。
 3. 该文件必须导出 `torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)`，并通过 `PYBIND11_MODULE(...)` 暴露。
 4. 你必须执行真实的候选搜索：生成、编译、测试、benchmark、比较、晋升最佳候选。
 5. 不要把预先藏好的最终 CUDA 代码直接转储出来；需要真实地根据评测反馈迭代。
-6. 可以按需调用 phase1 的硬件 probe / profiling 工具辅助决策，但它们只是辅助能力，不是主任务。
+6. 如果 phase1 的 probe 工具没有显式启用，就不要假设它存在；phase2 主链只依赖候选生成、评测、修复、晋升。
 7. 严禁下载外部资源、克隆外部仓库或依赖第三方 benchmark。
 8. 优先做小步、安全、可验证的改动，并始终维护一个可编译的最新版 `optimized_lora.cu`。
 9. 当工程状态已经满足结束条件时，请停止继续试验并输出最终总结 JSON。
 10. 你必须把“候选搜索”和“best 晋升”分开：先写候选、先评测，再决定是否晋升，不要直接覆盖 best。
 11. 每次准备晋升前都要查看评测报告里的 correctness、shape_preset、mean_speedup、min_speedup 和 score。
-12. 当当前 best 的 speedup 仍不理想时，应优先使用 `generate_cuda_candidate_from_prompt` 和 `revise_candidate`，而不是一直停留在 ATen 级微调。
+12. 真正的性能优化目标是减少 HBM 中间读写，尽量把 `WX`、`B^T X`、最终低秩更新融合到尽可能少的 CUDA kernel 中，并优先利用 shared memory 与寄存器完成数据复用。
+13. 除了基线/回退候选外，不要把主要搜索精力放在 `at::mm` / `at::addmm` 组合上；应优先尝试单核融合、shared-memory tiling、register tiling、访存合并和 bank-conflict 规避。
 """
 
 
@@ -29,6 +32,8 @@ def build_phase2_prompt(*, project_root: Path, time_budget_seconds: float, seed_
     candidates_dir = workspace_root / "candidates"
     logs_dir = workspace_root / "logs"
     best_dir = workspace_root / "best"
+    target_speedup = phase2_speedup_target()
+    stalled_round_limit = phase2_stalled_round_limit()
 
     return f"""你正在执行 phase2：LoRA 算子优化。
 
@@ -41,6 +46,7 @@ Y = W X + A(B^T X)
 - 所有张量为 float32
 - 评测要求单文件 `optimized_lora.cu`
 - 运行预算约 {time_budget_seconds / 60.0:.1f} 分钟
+- 推荐把 `mean_speedup >= {target_speedup:.2f}` 视为“已比较理想”，但这不是 correctness 之上的硬门槛
 
 工作目录规划：
 - 提交根目录最终文件：{optimized_path}
@@ -49,39 +55,41 @@ Y = W X + A(B^T X)
 - best 快照目录：{best_dir}
 - 预置模板清单：{seed_manifest_path}
 
-你必须执行以下工作流：
-1. 先阅读并评估当前的 `optimized_lora.cu`，把它当作基线。
-2. 先读取 `seed_manifest.json`，同时查看其中的 `templates` 和 `generation_prompts`。
-3. 生成多个候选实现到 `lora_workspace/candidates/`，不要直接覆盖 best。
-4. 使用 `evaluate_lora_candidate` 做 correctness + benchmark 评测。
-5. 至少比较多个候选，再决定是否用 `promote_lora_candidate` 晋升为新的 `optimized_lora.cu`；严禁晋升未通过 correctness 的候选。
-6. 搜索时先用 `quick` 预设快速筛选；在准备收尾前，必须对当前 best 至少做一次 `full` 预设验证。
-7. 如有必要，可使用 phase1 的 probe 工具辅助判断瓶颈，但不要把 profiling 当作主链。
-8. 每轮最多做一个小步改动并记录意图，例如“替换 B^T X 路径”“尝试 block size 变体”“尝试轻量 fusion”，避免同时修改太多点导致无法归因。
-9. 当基线 best_speedup < 1.1，或尚未尝试过融合 kernel 时，优先从 `generation_prompts` 里按顺序尝试：
-   - `fused_v1`
-   - `lowrank_outer`
-   - `wmma_tensorcore`
-10. 对于 `generation_prompts`，优先使用工具 `generate_cuda_candidate_from_prompt` 动态生成候选；若出现编译错误、correctness 失败或明显性能瓶颈，则用 `revise_candidate` 基于失败信息继续修复。
+执行协议：
+1. 先阅读当前 `optimized_lora.cu`，然后对它执行一次 `quick` 评测，得到明确基线。
+2. 读取 `seed_manifest.json`，了解可直接复用的 `templates` 与可调用的 `generation_prompts`。
+3. 候选统一写入 `lora_workspace/candidates/`，任何新想法都先作为候选，不要直接覆盖根目录 best。
+4. 每写出一个候选后，立即调用 `evaluate_lora_candidate`，避免堆积一批未评测候选。
+5. 只有通过 correctness 的候选才允许与当前 best 比较；只有有明确优势的候选才调用 `promote_lora_candidate`。
+6. 搜索阶段优先使用 `quick`；收尾前必须让当前 best 至少通过一次 `full`。
 
-候选搜索策略要求：
-- 第一阶段：先对当前 `optimized_lora.cu` 跑一次 `quick` 评测，得到明确基线报告。
-- 第二阶段：确保最小可用版本正确、可编译，然后做低风险优化，例如 launch 配置、访问模式、分步/融合策略比较。
-- 第三阶段：若时间允许，再尝试更积极的优化，例如 tile、shared memory、register blocking、针对 r=16 的结构化优化。
-- 第四阶段：在收尾前，对当前最优候选执行一次 `full` 评测；若 full 结果不通过或明显退化，则不要结束。
-- 若当前 best 的 mean_speedup 仍 < 1.1，优先切换到尚未尝试过的下一个 `generation_prompt`，不要在同一类 ATen 小修小补上空转。
+推荐搜索顺序：
+1. 先评测基线 `optimized_lora.cu`。
+2. 基线评测完成后，优先直接尝试真正的融合候选，而不是先在模板上做 ATen 级微调。
+3. 按顺序尝试这些 generation prompt：
+   - `fused_tiled_fp32`
+   - `lowrank_outer_fallback`
+   - `fused_register_tiled`
+   - `tensorcore_wmma`
+4. 调用 `generate_cuda_candidate_from_prompt` 时，优先直接传 `prompt_id`，不要手工拷贝整段 prompt。
+5. 如果第一个高风险 fused 候选编译通过但 correctness 失败，不要连续在高风险 prompt 上空转；优先转到 `lowrank_outer_fallback` 或模板候选，先拿到一个稳定可比较的正确实现。
+6. 某个候选若编译失败、correctness 失败或性能太差，优先调用 `revise_candidate` 做单点修复，而不是完全推倒重来。
 
-更具体的 LoRA kernel 优化 playbook：
-- 优先观察该算子的结构：`W@X` 是大矩阵乘，`A(B^T X)` 是 rank=16 的低秩更新；低秩路径远小于主 GEMM，可考虑把优化重点放在低秩更新与最终融合/epilogue 上。
-- 第一步通常不要同时自定义 `W@X` 和低秩路径；先保持一条路径稳定，再替换另一条路径，避免 correctness 与性能问题难以归因。
-- 针对 `r=16`，优先尝试：
-  - 将 `A(B^T X)` 写成小 rank 的显式累加
-  - 对 rank 维做 `#pragma unroll`
-  - 将最终 `WX + low_rank_update` 融合进单个 epilogue kernel
-- 若尝试自定义 CUDA kernel，优先从“低秩路径 epilogue kernel”起步，而不是一开始就重写完整 GEMM。
-- 若某个自定义 kernel 模板在当前环境连续编译失败，应回退到更保守的 ATen + 轻量自定义混合路径，不要在同一失败思路上空转。
-- 若 full 验证阶段发现性能退化，可保留 quick 阶段更快的 best，但必须重新对该 best 做 full 验证。
-- `wmma_tensorcore` 放在最后尝试，因为它有更高精度风险；在尝试它之前，应先覆盖 `fused_v1` 和 `lowrank_outer`。
+LoRA 结构化优化要点：
+- `W @ X` 是主成本大 GEMM，`A(B^T X)` 是 rank=16 的低秩更新。
+- 真正高性能的方向不是把三个步骤拆成多个 kernel，而是尽量把 `WX`、`B^T X` 和低秩更新融合，减少全局内存往返。
+- 第一优先级是设计 fused kernel：通过 block tiling 把 `W`、`X`、`B` 的 tile 放进 shared memory，再让线程在寄存器里维护输出 micro-tile。
+- 针对 rank=16，可以优先尝试：
+  - 显式 rank 循环
+  - `#pragma unroll`
+  - shared-memory tiling
+  - register tiling / thread-level micro-tile
+  - 访存合并
+  - 减少 shared memory bank conflict
+  - 在单个 kernel 中完成尽可能多的累加路径
+- 如果 full fusion 太难，次优方案是“部分融合但不落大中间张量到 HBM”，而不是直接退回纯 ATen 组合。
+- 只有当激进 fused 路线连续失败时，才退回更保守的 fallback 候选继续保持可编译与可验证。
+- 一旦已经有正确的 baseline / fallback 候选，并且新的高风险 fused 候选连续失败，就应尽快补齐 full 验证并结束，不要把预算全部消耗在持续失败的激进搜索上。
 
 候选命名与评测协议：
 - 候选文件统一写入 `lora_workspace/candidates/`。
@@ -91,14 +99,13 @@ Y = W X + A(B^T X)
 - 只有当候选通过 correctness，且相对当前 best 在 score 或至少 speedup 上有清晰优势，才执行 `promote_lora_candidate`。
 - 若当前 best 仅完成了 `quick` 而未完成 `full`，则可以为了补齐 full 验证而再次晋升相同源码对应的 full 报告。
 - 启动时请优先读取预置模板清单；如果其中某个模板已经接近你的策略方向，应从模板出发做小步修改，而不是每次从零生成整份大文件。
-- 需要真正生成融合 kernel 时，优先从 `generation_prompts` 里复制完整 prompt 内容并传给 `generate_cuda_candidate_from_prompt`。
 - 建议优先评测这些类型的候选：
   - `baseline_aten_mm`
-  - `low_rank_addmm`
+  - `gen_fused_tiled_fp32`
+  - `gen_fused_register_tiled`
+  - `gen_tensorcore_wmma`
+  - `gen_lowrank_outer_fallback`
   - `custom_lowrank_epilogue`
-  - `gen_fused_v1`
-  - `gen_lowrank_outer`
-  - `gen_wmma_tensorcore`
 
 停止条件要求：
 - 根目录存在 `optimized_lora.cu`
@@ -108,8 +115,9 @@ Y = W X + A(B^T X)
 - 当前 best 至少完成一次 `full` 预设验证
 - 当前 best 的 `mean_speedup` 与 `min_speedup` 已在总结 JSON 中明确给出
 - 若没有更优候选，允许结束，但必须说明最终 best 基于哪份报告
-- 如果三个融合 `generation_prompts` 已全部尝试过且当前 best 的 `mean_speedup` 仍 < 1.2，可以结束
-- 或者如果连续 3 轮迭代都没有带来超过 2% 的 speedup 提升，也可以结束
+- 如果已经有正确的 current best，且高风险 fused prompt 连续失败，而 fallback/template 也没有带来明确提升，可以结束
+- 如果高优先级 fused generation prompts 已全部尝试过，且 fallback 候选也无法继续提升，可以结束
+- 或者如果连续 {stalled_round_limit} 轮迭代都没有带来显著速度提升，也可以结束
 - 否则不要过早结束，继续尝试尚未覆盖的 `generation_prompts` 或对失败候选调用 `revise_candidate`
 
 最终输出要求：
@@ -130,8 +138,9 @@ Y = W X + A(B^T X)
 实现提醒：
 - 提交文件必须单文件、自包含
 - 不要依赖额外 `.h/.cuh/.cpp/.cu`
-- 可以先用 ATen 运算建立正确基线，再逐步替换为自定义 CUDA kernel
+- 可以先用 ATen 运算建立正确基线，但主要搜索目标应尽快转向 fused CUDA kernel，而不是在 API 组合上空转
 - 不要只生成一个候选然后立刻停止，必须体现真实比较与迭代
 - 如果编译环境异常导致某类候选持续失败，应收缩到更保守的实现，而不是在同类失败上无限重试
+- 如果你准备使用 `generate_cuda_candidate_from_prompt`，优先只传 `prompt_id` 与 `candidate_name`
 - 如果工程状态已满足结束条件，不要继续调用工具；直接输出最终 JSON
 """

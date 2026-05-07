@@ -3,87 +3,136 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-FUSED_V1_PROMPT = """You are a CUDA optimization expert. Your task is to write a single-file CUDA kernel that implements the LoRA forward pass:
+FUSED_TILED_FP32_PROMPT = """You are writing a single-file CUDA extension for the LoRA forward pass:
 Y = W @ X + A @ (B^T @ X)
-where:
-- W (d x d), X (d x d), A (d x 16), B (d x 16), Y (d x d), all float32.
-- d is a multiple of 16, within [3584, 4608].
 
-**Core constraints**:
-- Output ONE self-contained .cu file with the interface:
+Target:
+- W(d,d), X(d,d), A(d,16), B(d,16), Y(d,d), all float32 on CUDA.
+- d is in [3584, 4608].
+- The goal is a genuinely fused CUDA implementation, not a composition of ATen matmul/addmm calls.
+
+Required interface:
+- Implement exactly:
   torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
-- The file must compile with torch.utils.cpp_extension.load.
-- Do NOT use any external headers except <torch/extension.h> and standard CUDA/C++ headers.
-- The kernel must produce exactly Y = WX + A(B^T X) with torch.allclose(rtol=1e-4, atol=1e-4).
-- Use float32 for all loads, accumulators, temporaries, and stores. Do NOT use half, bf16, WMMA, Tensor Cores, fast-math intrinsics, or approximate reductions.
-- Avoid fragile internal headers such as ATen/cuda/CUDAGuard.h. Do not rely on OptionalCUDAGuard or device_of.
-- Handle every boundary tile exactly and deterministically. Correctness is more important than peak speed for this first fused candidate.
+- Export it with PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+- Return one complete self-contained .cu file only
 
-**Optimization strategy**:
-Fuse the three stages into a single kernel launch. For each output tile (tileSize = 64 or 128):
-1. Load a tile of W and a tile of X into shared memory, compute the WX contribution into registers.
-2. Immediately compute the LoRA contribution for that same tile:
-   - For each rank k in 0..15, load column k of A and the corresponding row of (B^T X) (obtained via a small tile of B and X), compute the outer product and add to the same register accumulator.
-3. Write the final tile of Y to global memory.
+Hard requirements:
+- Do NOT use at::mm, at::matmul, at::addmm, or cuBLAS wrappers for the main computation.
+- Use float32 loads, float32 accumulation, and float32 output.
+- Use shared-memory tiling for W, X, and any reusable B/X data needed by the fused computation.
+- Use register tiling: each thread should accumulate a small output micro-tile in registers.
+- Keep intermediate data on chip whenever possible. Do not materialize WX or BTX in global memory.
+- Make global-memory accesses coalesced and avoid obvious shared-memory bank conflicts.
+- Handle all boundary tiles correctly.
 
-Use standard threadblock synchronization. No intermediate global memory for BTX or A*BTX. The kernel must handle arbitrary d inside the given range, with a simple launch grid (e.g., dim3 grid(ceil(d/tileSize), ceil(d/tileSize)), block(tileSize, tileSize)).
-Before the final code, sanity-check that the implementation is numerically exact enough for the allclose threshold and that every variable name matches the intended tensor layout.
-Provide the complete .cu file. Include proper PyTorch binding via PYBIND11_MODULE.
+Recommended design:
+1. Launch a 2D thread-block grid over Y tiles.
+2. For each output tile, cooperatively load tiles of W and X into shared memory and accumulate the WX term into registers.
+3. In the same kernel, compute the low-rank contribution without writing BTX to global memory:
+   - iterate over the K dimension in tiles
+   - accumulate partial dot products for the 16 rank channels
+   - reuse those partial values to update the same output-register tile
+4. Store the final Y tile once.
+
+Implementation guidance:
+- A reasonable starting point is block tiles like 64x64 or 128x64 with thread-level micro-tiles such as 4x4 or 8x4.
+- Specialize aggressively for rank=16.
+- Use #pragma unroll on the rank loop where helpful.
+- Prefer explicit kernels and indexing over template metaprogramming.
+- Add a brief comment for the block tile shape and register tile shape.
+
+Return the full .cu file only.
 """
 
-LOWRANK_OUTER_PROMPT = """You are a CUDA performance engineer. Generate a single-file CUDA extension for the LoRA forward pass:
-Y = W @ X + A @ (B^T @ X)   with rank r=16, all tensors float32, d in [3584, 4608].
+FUSED_REGISTER_TILED_PROMPT = """Write a single-file CUDA extension for:
+Y = W @ X + A @ (B^T @ X)
 
-**Requirements**:
-- Function signature: torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
-- The .cu file must be self-contained, without extra .cuh/.h files.
-- Use proper PyTorch extension bindings (PYBIND11_MODULE).
-- Keep the implementation entirely float32. Do NOT use half, bf16, WMMA, Tensor Cores, or fast approximate math.
-- Avoid internal headers like ATen/cuda/CUDAGuard.h. Do not use OptionalCUDAGuard or device_of.
-- The result must pass torch.allclose(rtol=1e-4, atol=1e-4) against the float32 reference.
+Primary goal:
+- Produce a tightly fused kernel that uses hierarchical tiling:
+  - global memory -> shared memory
+  - shared memory -> registers
+  - register micro-tile accumulation for Y
 
-**Kernel design**:
-- Use an output-tile parallelization: each thread block computes a TILE_X × TILE_Y (e.g., 64×64) block of Y.
-- Decompose A(B^T X) into sum of 16 outer products:
-    for k in 0..15:  Y += A[:,k] * (B[:,k]^T @ X)
-- In the kernel:
-  1. Load the necessary tile of W and tile of X into shared memory, compute WX contribution into registers.
-  2. For each k, load the required segment of A[:,k] and compute the partial product with the already-loaded X tile (using B’s corresponding row). Do this using shared memory for A_column_k and a small buffer for the B^T X intermediate.
-  3. Accumulate all contributions into registers, then write the final tile to Y.
+Constraints:
+- Single self-contained .cu file
+- forward(W, X, A, B) signature
+- PYBIND11_MODULE binding
+- float32 only
+- no extra source/header files
 
-- Choose tile sizes so that shared memory per block stays under 48 KB (Ampere). Use simple and correct memory accesses first; only use vectorized loads when alignment is guaranteed.
-- Add comments explaining tile choices and synchronization.
-- Double-check the boundary conditions and rank loop before returning the final code.
-Output the complete .cu code.
+Performance requirements:
+- Do not decompose the operator into separate ATen matrix multiplications.
+- Avoid global-memory materialization of intermediate WX or BTX.
+- Each thread should compute multiple output elements in registers.
+- Reuse X tile data across both the WX path and the low-rank path.
+- Use shared memory for block tiles and structure accesses to avoid bank conflicts.
+
+Suggested structure:
+- One main fused kernel for the general case
+- Optional small helper kernels only for edge handling or layout transforms if absolutely necessary
+- Explicitly unroll the rank-16 dimension
+
+Correctness requirements:
+- Must pass torch.allclose(rtol=1e-4, atol=1e-4)
+- Must handle arbitrary d in [3584, 4608]
+- Must avoid undefined behavior on boundary tiles
+
+If the full fusion becomes too complex, prefer a partially fused kernel that still avoids writing the biggest intermediate tensors to HBM.
+
+Return the complete .cu file only.
 """
 
-WMMA_TENSORCORE_PROMPT = """You are a CUDA Tensor Core specialist. Write a self-contained .cu file that implements the LoRA forward pass on Ampere (SM 8.0, RTX 3090):
-Y = W @ X + A @ (B^T @ X),  d in [3584,4608], r=16, all inputs/outputs float32.
+TENSORCORE_WMMA_PROMPT = """Write a single-file CUDA extension for the fused LoRA forward pass on Ampere:
+Y = W @ X + A @ (B^T @ X)
 
-**Interface**:
-torch::Tensor forward(torch::Tensor W, torch::Tensor X, torch::Tensor A, torch::Tensor B)
+Goal:
+- Explore an aggressive fused design using Tensor Cores / WMMA where useful, while keeping the final output numerically close enough to pass torch.allclose(rtol=1e-4, atol=1e-4).
 
-**Optimization targets**:
-- Use nvcuda::wmma for 16x16x16 matrix multiply-add operations on Tensor Cores.
-- Perform WX and LoRA contribution using WMMA with FP16 inputs and FP32 accumulation.
-- Fuse the two stages in one kernel: compute a 16x16 tile of Y, then immediately add the LoRA contribution (A(B^T X)) to the same tile without writing to global memory.
-- Despite using WMMA, the final output must still pass torch.allclose(rtol=1e-4, atol=1e-4). Favor correctness over aggressive approximations.
+Requirements:
+- Single self-contained .cu file
+- forward(W, X, A, B)
+- PYBIND11_MODULE binding
+- Keep the output tensor in float32
+- Use float32 accumulation
+- Avoid writing large intermediates such as WX or BTX to global memory
 
-**Implementation plan**:
-1. Load 16x16 tiles of W and X (converted to half) into WMMA fragments, compute with mma_sync.
-2. For the LoRA part, for each rank k (0..15):
-   - Load the 16-element column of A and the corresponding row of (B^T X) (computed on-the-fly from a 16x16 tile of B and X using another WMMA call or manual half-precision multiply-add).
-   - Accumulate the outer product using the same WMMA fragment.
-3. Store the final FP32 tile to Y.
+Design direction:
+- Tile the output in WMMA-friendly shapes
+- Reuse shared-memory tiles across the WX path and the low-rank path
+- Treat rank=16 as a first-class specialization
+- Keep boundary handling explicit and safe
 
-**Constraints**:
-- Must compile with torch.utils.cpp_extension.load.
-- Use only <torch/extension.h>, standard CUDA headers, and <cuda_fp16.h>, <mma.h>.
-- Output must pass torch.allclose(rtol=1e-4, atol=1e-4) against the float32 reference.
-- Ensure proper threadblock and grid sizes for arbitrary d (pad or handle boundary tiles correctly).
-- Keep accumulators and the output tensor in float32, and make the boundary path explicit rather than relying on undefined behavior.
+Important:
+- Favor a correct, compilable aggressive candidate over pseudo-code.
+- If mixed-precision input staging is used, keep accumulation and output in float32.
+- Do not rely on external files or helper libraries beyond standard CUDA / PyTorch extension headers.
 
-Provide the full .cu file.
+Return the full .cu file only.
+"""
+
+LOWRANK_OUTER_FALLBACK_PROMPT = """Generate a fallback single-file CUDA extension for:
+Y = W @ X + A @ (B^T @ X)
+
+Use this direction only if aggressive fused kernels keep failing.
+
+Goal:
+- Still reduce memory traffic relative to a naive ATen composition, but allow a more conservative structure.
+- Prefer partial fusion and explicit CUDA kernels over pure at::mm + at::addmm composition.
+
+Requirements:
+- Single self-contained .cu file
+- forward(W, X, A, B)
+- PYBIND11_MODULE binding
+- float32 only
+- no extra source/header files
+
+Preferred fallback shape:
+- Keep at most one large intermediate in global memory
+- Make the final low-rank update a custom CUDA kernel
+- Specialize the rank-16 path with unrolled accumulation
+
+Return the full .cu file only.
 """
 
 
@@ -270,21 +319,43 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 def build_generation_prompt_catalog() -> list[dict[str, str]]:
     return [
         {
-            "id": "fused_v1",
-            "description": "Fused LoRA single kernel, tile size 64 or 128",
-            "prompt": FUSED_V1_PROMPT,
+            "id": "fused_tiled_fp32",
+            "description": "Single-kernel fused FP32 design with shared-memory tiling and register micro-tiles",
+            "risk_level": "high",
+            "recommended_when": "First aggressive candidate after measuring the baseline",
+            "prompt": FUSED_TILED_FP32_PROMPT,
         },
         {
-            "id": "lowrank_outer",
-            "description": "Tiled low-rank outer product fused kernel",
-            "prompt": LOWRANK_OUTER_PROMPT,
+            "id": "lowrank_outer_fallback",
+            "description": "Fallback partial-fusion path when aggressive fused kernels repeatedly fail",
+            "risk_level": "medium",
+            "recommended_when": "Use early as a recovery path after the first fused candidate fails correctness",
+            "prompt": LOWRANK_OUTER_FALLBACK_PROMPT,
         },
         {
-            "id": "wmma_tensorcore",
-            "description": "Tensor Core WMMA fused kernel (FP16/FP32)",
-            "prompt": WMMA_TENSORCORE_PROMPT,
+            "id": "fused_register_tiled",
+            "description": "Hierarchical fused kernel with shared-memory tiles and thread-level register tiling",
+            "risk_level": "high",
+            "recommended_when": "Try after a stable fallback exists, or when the first fused kernel compiles but still underutilizes on-chip storage",
+            "prompt": FUSED_REGISTER_TILED_PROMPT,
+        },
+        {
+            "id": "tensorcore_wmma",
+            "description": "Aggressive fused Tensor Core / WMMA candidate with float32 accumulation",
+            "risk_level": "high",
+            "recommended_when": "When fused FP32 kernels are correct but speedup is still not strong enough",
+            "prompt": TENSORCORE_WMMA_PROMPT,
         },
     ]
+
+
+def resolve_generation_prompt(prompt_id: str) -> dict[str, str]:
+    normalized_id = str(prompt_id).strip()
+    for item in build_generation_prompt_catalog():
+        if item["id"] == normalized_id:
+            return item
+    available = ", ".join(item["id"] for item in build_generation_prompt_catalog())
+    raise KeyError(f"未知 generation prompt id: {normalized_id}. 可选值: {available}")
 
 
 def get_generation_prompts(manifest_path: str | Path) -> list[dict[str, str]]:
@@ -299,7 +370,11 @@ def get_generation_prompts(manifest_path: str | Path) -> list[dict[str, str]]:
             continue
         prompt_id = str(item.get("id") or "").strip()
         description = str(item.get("description") or "").strip()
-        prompt = str(item.get("prompt") or "").strip()
+        try:
+            catalog_item = resolve_generation_prompt(prompt_id)
+        except KeyError:
+            catalog_item = None
+        prompt = catalog_item["prompt"] if catalog_item is not None else str(item.get("prompt") or "").strip()
         if prompt_id and prompt:
             normalized.append(
                 {
@@ -316,8 +391,7 @@ def write_seed_candidate_templates(candidates_dir: Path) -> dict[str, str]:
     manifest: list[dict[str, str]] = []
     for item in build_seed_template_catalog():
         path = candidates_dir / item["file_name"]
-        if not path.exists():
-            path.write_text(item["content"], encoding="utf-8")
+        path.write_text(item["content"], encoding="utf-8")
         manifest.append(
             {
                 "file_name": item["file_name"],
@@ -330,7 +404,15 @@ def write_seed_candidate_templates(candidates_dir: Path) -> dict[str, str]:
     manifest_path = candidates_dir / "seed_manifest.json"
     manifest_payload = {
         "templates": manifest,
-        "generation_prompts": build_generation_prompt_catalog(),
+        "generation_prompts": [
+            {
+                "id": item["id"],
+                "description": item["description"],
+                "risk_level": item["risk_level"],
+                "recommended_when": item["recommended_when"],
+            }
+            for item in build_generation_prompt_catalog()
+        ],
     }
     manifest_path.write_text(json.dumps(manifest_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return {
